@@ -66,54 +66,91 @@ function M._do_create_branch(branch_name, base_branch, callback)
   })
 end
 
--- Find the remote for a specific branch/user (for forks)
-function M.find_remote_for_user(username, callback)
-  vim.fn.jobstart("git remote -v", {
+-- Add remote for fork PR if needed
+function M.add_fork_remote(repo_owner, repo_url, callback)
+  if not repo_owner or not repo_url then
+    callback("origin")
+    return
+  end
+
+  local remote_name = "fork-" .. repo_owner
+
+  -- Check if remote already exists
+  vim.fn.jobstart("git remote", {
     stdout_buffered = true,
     on_stdout = function(_, data)
-      if not data then
-        vim.schedule(function()
-          callback("origin") -- fallback to origin
-        end)
-        return
-      end
-
-      -- Look for a remote that matches the username
-      for _, line in ipairs(data) do
-        if line:match(username) then
-          local remote = line:match("^(%S+)")
-          if remote then
-            vim.schedule(function()
-              callback(remote)
-            end)
-            return
+      local remote_exists = false
+      if data then
+        for _, line in ipairs(data) do
+          if line == remote_name then
+            remote_exists = true
+            break
           end
         end
       end
 
-      -- Not found, fallback to origin
       vim.schedule(function()
-        callback("origin")
+        if remote_exists then
+          -- Remote exists, just fetch
+          vim.fn.jobstart(string.format("git fetch %s", remote_name), {
+            on_exit = function(_, code)
+              vim.schedule(function()
+                if code == 0 then
+                  callback(remote_name)
+                else
+                  callback("origin") -- fallback
+                end
+              end)
+            end,
+          })
+        else
+          -- Add remote and fetch
+          vim.fn.jobstart(string.format("git remote add %s %s", remote_name, repo_url), {
+            on_exit = function(_, add_code)
+              vim.schedule(function()
+                if add_code == 0 then
+                  vim.fn.jobstart(string.format("git fetch %s", remote_name), {
+                    on_exit = function(_, fetch_code)
+                      vim.schedule(function()
+                        if fetch_code == 0 then
+                          callback(remote_name)
+                        else
+                          callback("origin") -- fallback
+                        end
+                      end)
+                    end,
+                  })
+                else
+                  callback("origin") -- fallback
+                end
+              end)
+            end,
+          })
+        end
       end)
     end,
   })
 end
 
-function M.soft_merge(source_branch, head_repo_owner, callback)
-  -- If head_repo_owner is provided, find the correct remote
-  if head_repo_owner then
-    M.find_remote_for_user(head_repo_owner, function(remote)
+function M.soft_merge(source_branch, head_repo_owner, head_repo_url, callback)
+  -- If head_repo_owner is provided, setup fork remote
+  if head_repo_owner and head_repo_url then
+    M.add_fork_remote(head_repo_owner, head_repo_url, function(remote)
       local remote_source = remote .. "/" .. source_branch
       local cmd = string.format("git merge --no-commit --no-ff %s", remote_source)
+
+      vim.notify(string.format("Debug: Merging %s", remote_source), vim.log.levels.INFO)
 
       vim.fn.jobstart(cmd, {
         on_exit = function(_, code)
           vim.schedule(function()
+            vim.notify(string.format("Debug: Merge exit code = %d", code), vim.log.levels.INFO)
             if code == 0 then
               M._unstage_all(callback)
             else
               -- Check if it's a conflict situation
               local status = vim.fn.system("git status --porcelain")
+              vim.notify(string.format("Debug: Git status after merge: %s", status:sub(1, 200)), vim.log.levels.INFO)
               local has_conflicts = status:match("UU ") or status:match("AA ") or status:match("DD ")
 
               if has_conflicts then
@@ -197,6 +234,10 @@ end
 
 function M.get_modified_files_with_lines(callback)
   local result = vim.fn.system("git diff --name-status")
+  vim.schedule(function()
+    vim.notify(string.format("Debug: git diff output (first 200 chars): %s", result:sub(1, 200)), vim.log.levels.INFO)
+  end)
+
   if vim.v.shell_error ~= 0 then
     callback({})
     return
@@ -209,6 +250,10 @@ function M.get_modified_files_with_lines(callback)
       table.insert(files, { path = path, status = status, line = nil })
     end
   end
+
+  vim.schedule(function()
+    vim.notify(string.format("Debug: Found %d files", #files), vim.log.levels.INFO)
+  end)
 
   local untracked = vim.fn.system("git ls-files --others --exclude-standard")
   if vim.v.shell_error == 0 then

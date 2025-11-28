@@ -265,4 +265,122 @@ function M.select_review_request(prs, picker, show_icons, on_select, on_mark_vie
   end
 end
 
+-- Pending comments picker functions
+local function format_pending_comment(comment)
+  local preview = comment.body:gsub("\n", " "):sub(1, 60)
+  if #comment.body > 60 then
+    preview = preview .. "..."
+  end
+  return string.format("[%s:%d] %s: %s", comment.path, comment.line, comment.user, preview)
+end
+
+local function select_pending_comments_native(comments, callback)
+  if #comments == 0 then
+    vim.notify("No pending comments", vim.log.levels.INFO)
+    return
+  end
+
+  local items = {}
+  for _, comment in ipairs(comments) do
+    table.insert(items, format_pending_comment(comment))
+  end
+
+  vim.ui.select(items, {
+    prompt = "Select pending comment:",
+  }, function(_, idx)
+    if idx then
+      callback(comments[idx])
+    end
+  end)
+end
+
+local function select_pending_comments_fzf(comments, callback)
+  local ok, fzf = pcall(require, "fzf-lua")
+  if not ok then
+    vim.notify("fzf-lua not installed, falling back to native picker", vim.log.levels.WARN)
+    return select_pending_comments_native(comments, callback)
+  end
+
+  if #comments == 0 then
+    vim.notify("No pending comments", vim.log.levels.INFO)
+    return
+  end
+
+  local items = {}
+  local comment_map = {}
+  for _, comment in ipairs(comments) do
+    local display = format_pending_comment(comment)
+    table.insert(items, display)
+    comment_map[display] = comment
+  end
+
+  fzf.fzf_exec(items, {
+    prompt = "Pending Comments> ",
+    actions = {
+      ["default"] = function(selected)
+        if selected and #selected > 0 then
+          callback(comment_map[selected[1]])
+        end
+      end,
+    },
+  })
+end
+
+local function select_pending_comments_telescope(comments, callback)
+  local ok, _ = pcall(require, "telescope")
+  if not ok then
+    vim.notify("telescope not installed, falling back to native picker", vim.log.levels.WARN)
+    return select_pending_comments_native(comments, callback)
+  end
+
+  if #comments == 0 then
+    vim.notify("No pending comments", vim.log.levels.INFO)
+    return
+  end
+
+  local pickers = require("telescope.pickers")
+  local finders = require("telescope.finders")
+  local conf = require("telescope.config").values
+  local actions = require("telescope.actions")
+  local action_state = require("telescope.actions.state")
+
+  pickers
+    .new({}, {
+      prompt_title = "Pending Comments",
+      finder = finders.new_table({
+        results = comments,
+        entry_maker = function(comment)
+          local display = format_pending_comment(comment)
+          return {
+            value = comment,
+            display = display,
+            ordinal = display,
+          }
+        end,
+      }),
+      sorter = conf.generic_sorter({}),
+      attach_mappings = function(prompt_bufnr, _)
+        actions.select_default:replace(function()
+          local selection = action_state.get_selected_entry()
+          actions.close(prompt_bufnr)
+          if selection then
+            callback(selection.value)
+          end
+        end)
+        return true
+      end,
+    })
+    :find()
+end
+
+function M.select_pending_comment(comments, picker, callback)
+  if picker == "fzf-lua" then
+    select_pending_comments_fzf(comments, callback)
+  elseif picker == "telescope" then
+    select_pending_comments_telescope(comments, callback)
+  else
+    select_pending_comments_native(comments, callback)
+  end
+end
+
 return M

@@ -42,6 +42,7 @@ M._buffer_changes = {}
 M._buffer_hunks = {}
 M._buffer_stats = {}
 M._viewed_files = {}
+M._local_pending_comments = {} -- Local storage for pending comments (not synced to GitHub yet)
 M._float_win_general = nil -- General info float (file x/total)
 M._float_win_buffer = nil  -- Buffer info float (hunks, stats, comments)
 M._float_win_keymaps = nil -- Keymaps float
@@ -81,6 +82,7 @@ local function save_session()
     previous_branch = vim.g.pr_review_previous_branch,
     modified_files = vim.g.pr_review_modified_files,
     viewed_files = M._viewed_files,
+    pending_comments = M._local_pending_comments,
     cwd = vim.fn.getcwd(),
   }
 
@@ -118,6 +120,63 @@ end
 
 -- Forward declarations
 local get_inline_diff
+
+-- Local pending comments management (stored locally, not on GitHub)
+local function generate_local_comment_id()
+  return "local_" .. os.time() .. "_" .. math.random(10000, 99999)
+end
+
+local function get_local_pending_comments_for_pr(pr_number)
+  return M._local_pending_comments[pr_number] or {}
+end
+
+local function add_local_pending_comment(pr_number, path, line, body, user)
+  if not M._local_pending_comments[pr_number] then
+    M._local_pending_comments[pr_number] = {}
+  end
+
+  local comment = {
+    id = generate_local_comment_id(),
+    path = path,
+    line = line,
+    body = body,
+    user = user,
+    created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    is_pending = true,
+    is_local = true,
+  }
+
+  table.insert(M._local_pending_comments[pr_number], comment)
+  return comment
+end
+
+local function remove_local_pending_comment(pr_number, comment_id)
+  if not M._local_pending_comments[pr_number] then
+    return false
+  end
+
+  for i, comment in ipairs(M._local_pending_comments[pr_number]) do
+    if comment.id == comment_id then
+      table.remove(M._local_pending_comments[pr_number], i)
+      return true
+    end
+  end
+
+  return false
+end
+
+local function get_local_pending_comments_for_file(pr_number, file_path)
+  local all_comments = get_local_pending_comments_for_pr(pr_number)
+  local file_comments = {}
+
+  for _, comment in ipairs(all_comments) do
+    if comment.path == file_path then
+      table.insert(file_comments, comment)
+    end
+  end
+
+  return file_comments
+end
 
 -- Collect all files from PR with their metadata
 local function collect_pr_files(callback)
@@ -1437,7 +1496,7 @@ local function display_comments(bufnr, comments)
 
   local lines_with_comments = {}
   for _, comment in ipairs(comments) do
-    if comment.line and comment.line > 0 then
+    if comment.line and type(comment.line) == "number" and comment.line > 0 then
       lines_with_comments[comment.line] = true
     end
   end
@@ -1447,15 +1506,33 @@ local function display_comments(bufnr, comments)
     local line_idx = line - 1
     if line_idx < line_count then
       local count = count_comments_at_line(comments, line)
+
+      -- Check if any comment on this line is pending
+      local has_pending = false
+      for _, c in ipairs(comments) do
+        if c.line == line and c.is_pending then
+          has_pending = true
+          break
+        end
+      end
+
       local text
       if M.config.show_icons then
-        text = count > 1 and string.format(" 💬 %d comments", count) or " 💬 1 comment"
+        if has_pending then
+          text = count > 1 and string.format(" ⏳ %d comments (pending)", count) or " ⏳ 1 comment (pending)"
+        else
+          text = count > 1 and string.format(" 💬 %d comments", count) or " 💬 1 comment"
+        end
       else
-        text = count > 1 and string.format(" [%d comments]", count) or " [1 comment]"
+        if has_pending then
+          text = count > 1 and string.format(" [%d comments (pending)]", count) or " [1 comment (pending)]"
+        else
+          text = count > 1 and string.format(" [%d comments]", count) or " [1 comment]"
+        end
       end
 
       vim.api.nvim_buf_set_extmark(bufnr, ns_id, line_idx, 0, {
-        virt_text = { { text, "DiagnosticInfo" } },
+        virt_text = { { text, has_pending and "DiagnosticWarn" or "DiagnosticInfo" } },
         virt_text_pos = "eol",
       })
     end
@@ -1533,17 +1610,36 @@ function M.load_comments_for_buffer(bufnr, force_reload)
       return
     end
 
+    -- Initialize comments if nil
+    if not comments then
+      comments = {}
+    end
+
     -- Also get pending comments and merge them
     github.get_pending_review_comments(pr_number, function(pending_comments, pending_err)
+      vim.notify(string.format("Debug load: Got %d pending comments, err=%s", #(pending_comments or {}), pending_err or "nil"), vim.log.levels.INFO)
+
       if not pending_err and pending_comments then
         -- Filter pending comments for this file and mark them as pending
+        local added_count = 0
         for _, pc in ipairs(pending_comments) do
+          vim.notify(string.format("Debug load: Pending comment path=%s, file_path=%s, line=%s", pc.path or "nil", file_path, tostring(pc.line)), vim.log.levels.INFO)
           if pc.path == file_path then
             pc.is_pending = true
             pc.body = pc.body .. " (pending)"
-            table.insert(comments or {}, pc)
+            table.insert(comments, pc)
+            added_count = added_count + 1
           end
         end
+        vim.notify(string.format("Debug load: Added %d pending comments to buffer", added_count), vim.log.levels.INFO)
+      end
+
+      -- Also merge local pending comments
+      local local_pending = get_local_pending_comments_for_file(pr_number, file_path)
+      vim.notify(string.format("Debug load: Got %d local pending comments for file", #local_pending), vim.log.levels.INFO)
+      for _, lpc in ipairs(local_pending) do
+        -- Local pending comments already have is_pending and is_local set
+        table.insert(comments, lpc)
       end
 
       if comments and #comments > 0 then
@@ -1607,6 +1703,80 @@ local function input_multiline(prompt, callback)
   vim.cmd("startinsert")
 end
 
+-- Show pending comments in a preview buffer
+local function show_pending_comments_preview(pending_comments, callback)
+  if not pending_comments or #pending_comments == 0 then
+    callback(true) -- No comments, proceed
+    return
+  end
+
+  -- Build content first to calculate height
+  local lines = {}
+  table.insert(lines, "These pending comments will be submitted with your review:")
+  table.insert(lines, "")
+
+  for i, comment in ipairs(pending_comments) do
+    table.insert(lines, string.format("━━━ Comment %d (PENDING) ━━━", i))
+    table.insert(lines, string.format("📄 %s:%d", comment.path, comment.line))
+    table.insert(lines, "")
+
+    -- Add comment body with wrapping
+    for line in comment.body:gmatch("[^\r\n]+") do
+      table.insert(lines, "  " .. line)
+    end
+    table.insert(lines, "")
+  end
+
+  table.insert(lines, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+  table.insert(lines, "")
+  table.insert(lines, "Press 'y' to proceed, 'n' to cancel, 'q' to cancel")
+
+  -- Calculate window dimensions
+  local width = math.floor(vim.o.columns * 0.8)
+  local content_height = #lines
+  local max_height = math.min(math.floor(vim.o.lines * 0.7), 25) -- Max 70% of screen or 25 lines
+  local height = math.min(content_height, max_height)
+  local row = math.floor((vim.o.lines - height) / 2)
+  local col = math.floor((vim.o.columns - width) / 2)
+
+  local buf = vim.api.nvim_create_buf(false, true)
+
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.api.nvim_buf_set_option(buf, "modifiable", false)
+  vim.api.nvim_buf_set_option(buf, "filetype", "markdown")
+
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = "editor",
+    width = width,
+    height = height,
+    row = row,
+    col = col,
+    style = "minimal",
+    border = "rounded",
+    title = string.format(" %d Pending Comment%s - y: proceed | n/q: cancel ", #pending_comments, #pending_comments > 1 and "s" or ""),
+    title_pos = "center",
+  })
+
+  -- Position cursor at the bottom to show the prompt
+  vim.api.nvim_win_set_cursor(win, {#lines, 0})
+
+  -- Set up keymaps
+  local function close_and_respond(proceed)
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+    if vim.api.nvim_buf_is_valid(buf) then
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end
+    callback(proceed)
+  end
+
+  vim.keymap.set("n", "y", function() close_and_respond(true) end, { buffer = buf, nowait = true })
+  vim.keymap.set("n", "n", function() close_and_respond(false) end, { buffer = buf, nowait = true })
+  vim.keymap.set("n", "q", function() close_and_respond(false) end, { buffer = buf, nowait = true })
+  vim.keymap.set("n", "<Esc>", function() close_and_respond(false) end, { buffer = buf, nowait = true })
+end
+
 function M.approve_pr()
   local pr_number = vim.g.pr_review_number
   if not pr_number then
@@ -1614,13 +1784,48 @@ function M.approve_pr()
     return
   end
 
-  input_multiline("Approval comment (optional)", function(body)
-    vim.notify("Approving PR #" .. pr_number .. "...", vim.log.levels.INFO)
-    github.approve_pr(pr_number, body, function(ok, err)
-      if ok then
-        vim.notify("✅ PR #" .. pr_number .. " approved!", vim.log.levels.INFO)
+  -- Get local pending comments
+  local pending_comments = get_local_pending_comments_for_pr(pr_number)
+
+  -- Show preview if there are pending comments
+  show_pending_comments_preview(pending_comments, function(proceed)
+    if not proceed then
+      vim.notify("Approval cancelled", vim.log.levels.INFO)
+      return
+    end
+
+    input_multiline("Approval comment (optional)", function(body)
+      vim.notify("Approving PR #" .. pr_number .. "...", vim.log.levels.INFO)
+
+      -- If there are pending comments, submit review with comments using API
+      if pending_comments and #pending_comments > 0 then
+        github.submit_review_with_comments(pr_number, "APPROVE", body, pending_comments, function(ok, err)
+          if ok then
+            -- Clear local pending comments after successful submission
+            M._local_pending_comments[pr_number] = nil
+            save_session()
+
+            -- Reload all open buffers to remove PENDING markers
+            for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+              if vim.api.nvim_buf_is_valid(buf) and M._buffer_comments[buf] then
+                M.load_comments_for_buffer(buf, true)
+              end
+            end
+
+            vim.notify(string.format("✅ PR #%d approved with %d comments!", pr_number, #pending_comments), vim.log.levels.INFO)
+          else
+            vim.notify("❌ Failed to approve: " .. (err or "unknown"), vim.log.levels.ERROR)
+          end
+        end)
       else
-        vim.notify("❌ Failed to approve: " .. (err or "unknown"), vim.log.levels.ERROR)
+        -- No pending comments, use simple approve
+        github.approve_pr(pr_number, body, function(ok, err)
+          if ok then
+            vim.notify("✅ PR #" .. pr_number .. " approved!", vim.log.levels.INFO)
+          else
+            vim.notify("❌ Failed to approve: " .. (err or "unknown"), vim.log.levels.ERROR)
+          end
+        end)
       end
     end)
   end)
@@ -1633,17 +1838,52 @@ function M.request_changes()
     return
   end
 
-  input_multiline("Reason for requesting changes", function(body)
-    if not body then
-      vim.notify("Reason is required", vim.log.levels.WARN)
+  -- Get local pending comments
+  local pending_comments = get_local_pending_comments_for_pr(pr_number)
+
+  -- Show preview if there are pending comments
+  show_pending_comments_preview(pending_comments, function(proceed)
+    if not proceed then
+      vim.notify("Request changes cancelled", vim.log.levels.INFO)
       return
     end
-    vim.notify("Requesting changes on PR #" .. pr_number .. "...", vim.log.levels.INFO)
-    github.request_changes(pr_number, body, function(ok, err)
-      if ok then
-        vim.notify("✅ Requested changes on PR #" .. pr_number, vim.log.levels.INFO)
+
+    input_multiline("Reason for requesting changes", function(body)
+      if not body then
+        vim.notify("Reason is required", vim.log.levels.WARN)
+        return
+      end
+      vim.notify("Requesting changes on PR #" .. pr_number .. "...", vim.log.levels.INFO)
+
+      -- If there are pending comments, submit review with comments using API
+      if pending_comments and #pending_comments > 0 then
+        github.submit_review_with_comments(pr_number, "REQUEST_CHANGES", body, pending_comments, function(ok, err)
+          if ok then
+            -- Clear local pending comments after successful submission
+            M._local_pending_comments[pr_number] = nil
+            save_session()
+
+            -- Reload all open buffers to remove PENDING markers
+            for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+              if vim.api.nvim_buf_is_valid(buf) and M._buffer_comments[buf] then
+                M.load_comments_for_buffer(buf, true)
+              end
+            end
+
+            vim.notify(string.format("✅ Requested changes on PR #%d with %d comments", pr_number, #pending_comments), vim.log.levels.INFO)
+          else
+            vim.notify("❌ Failed to request changes: " .. (err or "unknown"), vim.log.levels.ERROR)
+          end
+        end)
       else
-        vim.notify("❌ Failed to request changes: " .. (err or "unknown"), vim.log.levels.ERROR)
+        -- No pending comments, use simple request changes
+        github.request_changes(pr_number, body, function(ok, err)
+          if ok then
+            vim.notify("✅ Requested changes on PR #" .. pr_number, vim.log.levels.INFO)
+          else
+            vim.notify("❌ Failed to request changes: " .. (err or "unknown"), vim.log.levels.ERROR)
+          end
+        end)
       end
     end)
   end)
@@ -1671,6 +1911,383 @@ function M.add_comment()
   end)
 end
 
+-- Build a comment thread by following in_reply_to_id
+local function build_comment_thread(target_comment, all_comments)
+  local thread = {}
+  local comment_map = {}
+
+  -- Build a map of comment_id -> comment
+  for _, c in ipairs(all_comments) do
+    comment_map[c.id] = c
+  end
+
+  -- Find the root of the thread
+  local root = target_comment
+  while root.in_reply_to_id and comment_map[root.in_reply_to_id] do
+    root = comment_map[root.in_reply_to_id]
+  end
+
+  -- Build the thread from root to current
+  local function collect_thread(comment, depth)
+    depth = depth or 0
+    table.insert(thread, {comment = comment, depth = depth})
+
+    -- Find all replies to this comment
+    for _, c in ipairs(all_comments) do
+      if c.in_reply_to_id == comment.id then
+        collect_thread(c, depth + 1)
+      end
+    end
+  end
+
+  collect_thread(root, 0)
+  return thread
+end
+
+-- Wrap text to fit within a given width
+local function wrap_text(text, max_width, indent)
+  indent = indent or ""
+  local indent_len = #indent
+  local available_width = max_width - indent_len
+
+  if available_width <= 0 then
+    available_width = 40  -- fallback minimum
+  end
+
+  local wrapped_lines = {}
+
+  -- Split by existing line breaks first
+  for paragraph in text:gmatch("[^\r\n]+") do
+    local current_line = ""
+
+    -- Split paragraph into words
+    for word in paragraph:gmatch("%S+") do
+      local test_line = current_line == "" and word or (current_line .. " " .. word)
+
+      if #test_line <= available_width then
+        current_line = test_line
+      else
+        -- Current line is full, save it and start new line
+        if current_line ~= "" then
+          table.insert(wrapped_lines, indent .. current_line)
+        end
+        current_line = word
+      end
+    end
+
+    -- Add remaining text
+    if current_line ~= "" then
+      table.insert(wrapped_lines, indent .. current_line)
+    end
+  end
+
+  return wrapped_lines
+end
+
+-- Input reply with conversation context
+-- Input new comment with conversation context (like reply but for new comments)
+local function input_comment_with_context(target_comment, all_comments, prompt_title, callback)
+  local buf = vim.api.nvim_create_buf(false, true)
+  local width = math.floor(vim.o.columns * 0.7)
+  local height = math.floor(vim.o.lines * 0.6)
+
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = "editor",
+    width = width,
+    height = height,
+    col = math.floor((vim.o.columns - width) / 2),
+    row = math.floor((vim.o.lines - height) / 2),
+    style = "minimal",
+    border = "rounded",
+    title = " " .. prompt_title .. " (save: <C-s>, cancel: <Esc>) ",
+    title_pos = "center",
+  })
+
+  vim.bo[buf].filetype = "markdown"
+  vim.bo[buf].bufhidden = "wipe"
+
+  -- Build the thread
+  local thread = build_comment_thread(target_comment, all_comments)
+
+  -- Format the thread
+  local lines = {}
+  table.insert(lines, "--- Conversation Thread ---")
+  table.insert(lines, "")
+
+  for _, item in ipairs(thread) do
+    local indent = string.rep("  ", item.depth)
+    local prefix = item.depth > 0 and "↳ " or ""
+
+    -- Add author and date
+    local date = item.comment.created_at or ""
+    if date ~= "" then
+      date = " (" .. date:sub(1, 10) .. ")"
+    end
+
+    -- Add pending indicator if it's a local pending comment
+    local pending_mark = (item.comment.is_pending and item.comment.is_local) and " [PENDING]" or ""
+
+    table.insert(lines, indent .. prefix .. "**" .. item.comment.user .. "**" .. date .. pending_mark .. ":")
+
+    -- Add comment body with word wrap and indent
+    local wrapped = wrap_text(item.comment.body, width - 4, indent)
+    for _, wrapped_line in ipairs(wrapped) do
+      table.insert(lines, wrapped_line)
+    end
+    table.insert(lines, "")
+  end
+
+  table.insert(lines, "--- Answer here: ---")
+  table.insert(lines, "")
+
+  local separator_line = #lines - 1
+
+  -- Set the content
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+
+  -- Make everything above separator read-only by setting it as not modifiable initially
+  vim.bo[buf].modifiable = true
+
+  -- Create namespace for highlighting
+  local ns_id = vim.api.nvim_create_namespace("comment_context")
+
+  -- Highlight the separator
+  vim.api.nvim_buf_add_highlight(buf, ns_id, "Comment", separator_line - 1, 0, -1)
+  vim.api.nvim_buf_add_highlight(buf, ns_id, "Title", 0, 0, -1)
+
+  vim.keymap.set("n", "<Esc>", function()
+    vim.api.nvim_win_close(win, true)
+    vim.cmd("stopinsert")
+    callback(nil)
+  end, { buffer = buf })
+
+  vim.keymap.set({ "n", "i" }, "<C-s>", function()
+    local all_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+
+    -- Extract only the lines after the separator
+    local comment_lines = {}
+    local found_separator = false
+    for i, line in ipairs(all_lines) do
+      if line:match("^%-%-%-+ Answer here:") then
+        found_separator = true
+      elseif found_separator and line ~= "" then
+        table.insert(comment_lines, line)
+      end
+    end
+
+    local text = table.concat(comment_lines, "\n"):gsub("^%s+", ""):gsub("%s+$", "")
+
+    vim.api.nvim_win_close(win, true)
+    vim.cmd("stopinsert")
+
+    if text ~= "" then
+      callback(text)
+    else
+      callback(nil)
+    end
+  end, { buffer = buf })
+
+  -- Position cursor at the answer section
+  vim.api.nvim_win_set_cursor(win, {separator_line + 1, 0})
+
+  -- Enter insert mode automatically
+  vim.cmd("startinsert")
+end
+
+-- Show thread before adding/editing comment (deprecated - use input_comment_with_context instead)
+local function show_reply_thread(target_comment, all_comments, callback)
+  local buf = vim.api.nvim_create_buf(false, true)
+  local width = math.floor(vim.o.columns * 0.7)
+  local height = math.floor(vim.o.lines * 0.6)
+
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = "editor",
+    width = width,
+    height = height,
+    col = math.floor((vim.o.columns - width) / 2),
+    row = math.floor((vim.o.lines - height) / 2),
+    style = "minimal",
+    border = "rounded",
+    title = " Conversation Thread (press Enter to continue, Esc to cancel) ",
+    title_pos = "center",
+  })
+
+  -- Build the thread
+  local thread = build_comment_thread(target_comment, all_comments)
+
+  -- Format the thread
+  local lines = {}
+  table.insert(lines, "--- Conversation Thread ---")
+  table.insert(lines, "")
+
+  for _, item in ipairs(thread) do
+    local indent = string.rep("  ", item.depth)
+    local prefix = item.depth > 0 and "↳ " or ""
+
+    -- Add author and date
+    local date = item.comment.created_at or ""
+    if date ~= "" then
+      date = " (" .. date:sub(1, 10) .. ")"
+    end
+
+    -- Add pending indicator if it's a local pending comment
+    local pending_mark = (item.comment.is_pending and item.comment.is_local) and " [PENDING]" or ""
+
+    table.insert(lines, indent .. prefix .. "**" .. item.comment.user .. "**" .. date .. pending_mark .. ":")
+
+    -- Add comment body with word wrap and indent
+    local wrapped = wrap_text(item.comment.body, width - 4, indent)
+    for _, wrapped_line in ipairs(wrapped) do
+      table.insert(lines, wrapped_line)
+    end
+    table.insert(lines, "")
+  end
+
+  table.insert(lines, "")
+  table.insert(lines, "Press Enter to continue or Esc to cancel")
+
+  -- Set the content
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+
+  -- Set buffer options AFTER setting content
+  vim.bo[buf].filetype = "markdown"
+  vim.bo[buf].bufhidden = "wipe"
+  vim.bo[buf].modifiable = false
+
+  -- Create namespace for highlighting
+  local ns_id = vim.api.nvim_create_namespace("thread_preview")
+  vim.api.nvim_buf_add_highlight(buf, ns_id, "Title", 0, 0, -1)
+
+  local function close_and_continue()
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+    if vim.api.nvim_buf_is_valid(buf) then
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end
+    if callback then
+      callback()
+    end
+  end
+
+  local function close_and_cancel()
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+    if vim.api.nvim_buf_is_valid(buf) then
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end
+  end
+
+  vim.keymap.set("n", "<CR>", close_and_continue, { buffer = buf, nowait = true })
+  vim.keymap.set("n", "<Esc>", close_and_cancel, { buffer = buf, nowait = true })
+  vim.keymap.set("n", "q", close_and_cancel, { buffer = buf, nowait = true })
+end
+
+local function input_reply_with_context(target_comment, all_comments, callback)
+  local buf = vim.api.nvim_create_buf(false, true)
+  local width = math.floor(vim.o.columns * 0.7)
+  local height = math.floor(vim.o.lines * 0.6)
+
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = "editor",
+    width = width,
+    height = height,
+    col = math.floor((vim.o.columns - width) / 2),
+    row = math.floor((vim.o.lines - height) / 2),
+    style = "minimal",
+    border = "rounded",
+    title = " Reply to " .. target_comment.user .. " (save: <C-s>, cancel: <Esc>) ",
+    title_pos = "center",
+  })
+
+  vim.bo[buf].filetype = "markdown"
+  vim.bo[buf].bufhidden = "wipe"
+
+  -- Build the thread
+  local thread = build_comment_thread(target_comment, all_comments)
+
+  -- Format the thread
+  local lines = {}
+  table.insert(lines, "--- Conversation Thread ---")
+  table.insert(lines, "")
+
+  for _, item in ipairs(thread) do
+    local indent = string.rep("  ", item.depth)
+    local prefix = item.depth > 0 and "↳ " or ""
+
+    -- Add author and date
+    local date = item.comment.created_at or ""
+    if date ~= "" then
+      date = " (" .. date:sub(1, 10) .. ")"
+    end
+    table.insert(lines, indent .. prefix .. "**" .. item.comment.user .. "**" .. date .. ":")
+
+    -- Add comment body with word wrap and indent
+    local wrapped = wrap_text(item.comment.body, width - 4, indent)  -- -4 for border
+    for _, wrapped_line in ipairs(wrapped) do
+      table.insert(lines, wrapped_line)
+    end
+    table.insert(lines, "")
+  end
+
+  table.insert(lines, "--- Answer here: ---")
+  table.insert(lines, "")
+
+  local separator_line = #lines - 1
+
+  -- Set the content
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+
+  -- Make everything above separator read-only by setting it as not modifiable initially
+  vim.bo[buf].modifiable = true
+
+  -- Create namespace for highlighting
+  local ns_id = vim.api.nvim_create_namespace("reply_context")
+
+  -- Highlight the separator
+  vim.api.nvim_buf_add_highlight(buf, ns_id, "Comment", separator_line - 1, 0, -1)
+  vim.api.nvim_buf_add_highlight(buf, ns_id, "Title", 0, 0, -1)
+
+  vim.keymap.set("n", "<Esc>", function()
+    vim.api.nvim_win_close(win, true)
+    vim.cmd("stopinsert")
+    callback(nil)
+  end, { buffer = buf })
+
+  vim.keymap.set({ "n", "i" }, "<C-s>", function()
+    local all_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+
+    -- Extract only the lines after the separator
+    local reply_lines = {}
+    local found_separator = false
+    for i, line in ipairs(all_lines) do
+      if line:match("^%-%-%-+ Answer here:") then
+        found_separator = true
+      elseif found_separator and line ~= "" then
+        table.insert(reply_lines, line)
+      end
+    end
+
+    local text = table.concat(reply_lines, "\n"):gsub("^%s+", ""):gsub("%s+$", "")
+
+    vim.api.nvim_win_close(win, true)
+    vim.cmd("stopinsert")
+
+    if text ~= "" then
+      callback(text)
+    else
+      callback(nil)
+    end
+  end, { buffer = buf })
+
+  -- Position cursor at the answer section
+  vim.api.nvim_win_set_cursor(win, {separator_line + 1, 0})
+
+  -- Enter insert mode automatically
+  vim.cmd("startinsert")
+end
+
 function M.add_review_comment()
   local pr_number = vim.g.pr_review_number
   if not pr_number then
@@ -1682,20 +2299,48 @@ function M.add_review_comment()
   local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
   local file_path = get_relative_path(bufnr)
 
-  input_multiline("Review comment for line " .. cursor_line, function(body)
-    if not body then
-      return
+  -- Check if there are existing comments on this line
+  local comments = M._buffer_comments[bufnr] or {}
+  local line_comments = {}
+  for _, comment in ipairs(comments) do
+    if comment.line == cursor_line then
+      table.insert(line_comments, comment)
     end
-    vim.notify("Adding review comment...", vim.log.levels.INFO)
-    github.add_review_comment(pr_number, file_path, cursor_line, body, function(ok, err)
-      if ok then
-        vim.notify("✅ Review comment added", vim.log.levels.INFO)
-        M.load_comments_for_buffer(bufnr, true)
-      else
-        vim.notify("❌ Failed to add review comment: " .. (err or "unknown"), vim.log.levels.ERROR)
+  end
+
+  -- Show thread if there are existing comments
+  if #line_comments > 0 then
+    input_comment_with_context(line_comments[1], comments, "Add review comment", function(body)
+      if not body then
+        return
       end
+      vim.notify("Adding review comment...", vim.log.levels.INFO)
+      github.add_review_comment(pr_number, file_path, cursor_line, body, function(ok, err)
+        if ok then
+          vim.notify("✅ Review comment added", vim.log.levels.INFO)
+          M.load_comments_for_buffer(bufnr, true)
+        else
+          vim.notify("❌ Failed to add review comment: " .. (err or "unknown"), vim.log.levels.ERROR)
+        end
+      end)
     end)
-  end)
+  else
+    -- No existing comments, just prompt for input
+    input_multiline("Review comment for line " .. cursor_line, function(body)
+      if not body then
+        return
+      end
+      vim.notify("Adding review comment...", vim.log.levels.INFO)
+      github.add_review_comment(pr_number, file_path, cursor_line, body, function(ok, err)
+        if ok then
+          vim.notify("✅ Review comment added", vim.log.levels.INFO)
+          M.load_comments_for_buffer(bufnr, true)
+        else
+          vim.notify("❌ Failed to add review comment: " .. (err or "unknown"), vim.log.levels.ERROR)
+        end
+      end)
+    end)
+  end
 end
 
 function M.add_pending_comment()
@@ -1709,19 +2354,111 @@ function M.add_pending_comment()
   local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
   local file_path = get_relative_path(bufnr)
 
-  input_multiline("Pending comment for line " .. cursor_line .. " (will be posted with review)", function(body)
-    if not body then
+  -- Check if there are existing comments on this line
+  local comments = M._buffer_comments[bufnr] or {}
+  local line_comments = {}
+  for _, comment in ipairs(comments) do
+    if comment.line == cursor_line then
+      table.insert(line_comments, comment)
+    end
+  end
+
+  -- Show thread if there are existing comments
+  if #line_comments > 0 then
+    input_comment_with_context(line_comments[1], comments, "Add pending comment", function(body)
+      if not body then
+        return
+      end
+      -- Get current user
+      github.get_current_user(function(user, err)
+        local username = user or "me"
+
+        -- Add comment to local storage
+        local comment = add_local_pending_comment(pr_number, file_path, cursor_line, body, username)
+
+        -- Save session to persist pending comments
+        save_session()
+
+        vim.notify("✅ Pending comment added locally (will be posted with approval/rejection)", vim.log.levels.INFO)
+
+        -- Reload comments to show the new pending comment
+        M.load_comments_for_buffer(bufnr, false)
+      end)
+    end)
+  else
+    -- No existing comments, just prompt for input
+    input_multiline("Pending comment for line " .. cursor_line .. " (will be posted with review)", function(body)
+      if not body then
+        return
+      end
+      -- Get current user
+      github.get_current_user(function(user, err)
+        local username = user or "me"
+
+        -- Add comment to local storage
+        local comment = add_local_pending_comment(pr_number, file_path, cursor_line, body, username)
+
+        -- Save session to persist pending comments
+        save_session()
+
+        vim.notify("✅ Pending comment added locally (will be posted with approval/rejection)", vim.log.levels.INFO)
+
+        -- Reload comments to show the new pending comment
+        M.load_comments_for_buffer(bufnr, false)
+      end)
+    end)
+  end
+end
+
+function M.list_pending_comments()
+  -- Collect all pending comments from all PRs
+  local all_comments = {}
+  for pr_number, comments in pairs(M._local_pending_comments) do
+    for _, comment in ipairs(comments) do
+      table.insert(all_comments, comment)
+    end
+  end
+
+  if #all_comments == 0 then
+    vim.notify("No pending comments", vim.log.levels.INFO)
+    return
+  end
+
+  -- Use the UI picker to select a comment
+  ui.select_pending_comment(all_comments, M.config.picker, function(selected_comment)
+    if not selected_comment then
       return
     end
-    vim.notify("Adding pending comment...", vim.log.levels.INFO)
-    github.add_pending_review_comment(pr_number, file_path, cursor_line, body, function(ok, err)
-      if ok then
-        vim.notify("✅ Pending comment added (will be posted with approval/rejection)", vim.log.levels.INFO)
-        M.load_comments_for_buffer(bufnr, true)
-      else
-        vim.notify("❌ Failed to add pending comment: " .. (err or "unknown"), vim.log.levels.ERROR)
+
+    -- Navigate to the file and line
+    local file_path = selected_comment.path
+
+    -- Try to find buffer with this file
+    local found_buf = nil
+    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf):match(file_path .. "$") then
+        found_buf = buf
+        break
       end
-    end)
+    end
+
+    -- Open the file
+    if found_buf then
+      -- File is already open in a buffer, find or create a window for it
+      local wins = vim.fn.win_findbuf(found_buf)
+      if #wins > 0 then
+        vim.api.nvim_set_current_win(wins[1])
+      else
+        vim.cmd("buffer " .. found_buf)
+      end
+    else
+      -- Open the file
+      vim.cmd("edit " .. file_path)
+    end
+
+    -- Navigate to the line
+    vim.api.nvim_win_set_cursor(0, { selected_comment.line, 0 })
+    vim.notify(string.format("Navigated to %s:%d", file_path, selected_comment.line), vim.log.levels.INFO)
   end)
 end
 
@@ -1753,7 +2490,13 @@ function M.reply_to_comment()
   end
 
   local function do_reply(comment)
-    input_multiline("Reply to " .. comment.user, function(body)
+    -- Check if it's a pending comment
+    if comment.is_local then
+      vim.notify("❌ Cannot reply to pending comments. Submit the review first.", vim.log.levels.WARN)
+      return
+    end
+
+    input_reply_with_context(comment, comments, function(body)
       if not body then
         return
       end
@@ -1818,56 +2561,158 @@ function M.edit_my_comment()
     end
 
     local function do_edit(comment)
-      local buf = vim.api.nvim_create_buf(false, true)
-      local width = math.floor(vim.o.columns * 0.6)
-      local height = math.floor(vim.o.lines * 0.4)
-
-      local win = vim.api.nvim_open_win(buf, true, {
-        relative = "editor",
-        width = width,
-        height = height,
-        col = math.floor((vim.o.columns - width) / 2),
-        row = math.floor((vim.o.lines - height) / 2),
-        style = "minimal",
-        border = "rounded",
-        title = " Edit comment (save: <C-s>, cancel: <Esc>) ",
-        title_pos = "center",
-      })
-
-      local lines = {}
-      for line in comment.body:gmatch("[^\r\n]+") do
-        table.insert(lines, line)
-      end
-      vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-
-      vim.bo[buf].filetype = "markdown"
-      vim.bo[buf].bufhidden = "wipe"
-
-      vim.keymap.set("n", "<Esc>", function()
-        vim.api.nvim_win_close(win, true)
-        vim.cmd("stopinsert")
-      end, { buffer = buf })
-
-      vim.keymap.set({ "n", "i" }, "<C-s>", function()
-        local new_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-        local text = table.concat(new_lines, "\n")
-        vim.api.nvim_win_close(win, true)
-        vim.cmd("stopinsert")
-        if text ~= "" then
-          vim.notify("Updating comment...", vim.log.levels.INFO)
-          github.edit_comment(pr_number, comment.id, text, function(ok, edit_err)
-            if ok then
-              vim.notify("✅ Comment updated", vim.log.levels.INFO)
-              M.load_comments_for_buffer(bufnr, true)
-            else
-              vim.notify("❌ Failed to edit: " .. (edit_err or "unknown"), vim.log.levels.ERROR)
-            end
-          end)
+      -- Show thread first if there are other comments on this line
+      local line_comments = {}
+      for _, c in ipairs(comments) do
+        if c.line == cursor_line then
+          table.insert(line_comments, c)
         end
-      end, { buffer = buf })
+      end
 
-      -- Enter insert mode automatically
-      vim.cmd("startinsert")
+      local function open_edit_buffer()
+        local buf = vim.api.nvim_create_buf(false, true)
+        local width = math.floor(vim.o.columns * 0.7)
+        local height = math.floor(vim.o.lines * 0.6)
+
+        -- Set title based on comment type
+        local title = comment.is_local
+          and " Edit PENDING comment (save: <C-s>, cancel: <Esc>) "
+          or " Edit comment (save: <C-s>, cancel: <Esc>) "
+
+        local win = vim.api.nvim_open_win(buf, true, {
+          relative = "editor",
+          width = width,
+          height = height,
+          col = math.floor((vim.o.columns - width) / 2),
+          row = math.floor((vim.o.lines - height) / 2),
+          style = "minimal",
+          border = "rounded",
+          title = title,
+          title_pos = "center",
+        })
+
+        vim.bo[buf].filetype = "markdown"
+        vim.bo[buf].bufhidden = "wipe"
+
+        -- Build the thread if there are other comments
+        local lines = {}
+        if #line_comments > 1 then
+          -- Build and show thread
+          local thread = build_comment_thread(comment, comments)
+          table.insert(lines, "--- Conversation Thread ---")
+          table.insert(lines, "")
+
+          for _, item in ipairs(thread) do
+            local indent = string.rep("  ", item.depth)
+            local prefix = item.depth > 0 and "↳ " or ""
+
+            local date = item.comment.created_at or ""
+            if date ~= "" then
+              date = " (" .. date:sub(1, 10) .. ")"
+            end
+
+            local pending_mark = (item.comment.is_pending and item.comment.is_local) and " [PENDING]" or ""
+            table.insert(lines, indent .. prefix .. "**" .. item.comment.user .. "**" .. date .. pending_mark .. ":")
+
+            local wrapped = wrap_text(item.comment.body, width - 4, indent)
+            for _, wrapped_line in ipairs(wrapped) do
+              table.insert(lines, wrapped_line)
+            end
+            table.insert(lines, "")
+          end
+
+          table.insert(lines, "--- Edit your comment below: ---")
+          table.insert(lines, "")
+        end
+
+        local separator_line = #lines > 0 and (#lines - 1) or 0
+
+        -- Add current comment text
+        for line in comment.body:gmatch("[^\r\n]+") do
+          table.insert(lines, line)
+        end
+
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+
+        -- Highlight separator if thread was shown
+        if separator_line > 0 then
+          local ns_id = vim.api.nvim_create_namespace("edit_context")
+          vim.api.nvim_buf_add_highlight(buf, ns_id, "Comment", separator_line - 1, 0, -1)
+          vim.api.nvim_buf_add_highlight(buf, ns_id, "Title", 0, 0, -1)
+        end
+
+        vim.keymap.set("n", "<Esc>", function()
+          vim.api.nvim_win_close(win, true)
+          vim.cmd("stopinsert")
+        end, { buffer = buf })
+
+        vim.keymap.set({ "n", "i" }, "<C-s>", function()
+          local new_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+
+          -- Extract only the edited text (skip thread if shown)
+          local text
+          if separator_line > 0 then
+            -- Thread was shown, extract only lines after separator
+            local edit_lines = {}
+            local found_separator = false
+            for i, line in ipairs(new_lines) do
+              if line:match("^%-%-%-+ Edit your comment below:") then
+                found_separator = true
+              elseif found_separator and line ~= "" then
+                table.insert(edit_lines, line)
+              end
+            end
+            text = table.concat(edit_lines, "\n"):gsub("^%s+", ""):gsub("%s+$", "")
+          else
+            -- No thread, all lines are the comment
+            text = table.concat(new_lines, "\n")
+          end
+
+          vim.api.nvim_win_close(win, true)
+          vim.cmd("stopinsert")
+          if text ~= "" then
+            -- Check if it's a local pending comment
+            if comment.is_local then
+              vim.notify("Updating local pending comment...", vim.log.levels.INFO)
+
+              -- Find and update the comment in local storage
+              local pending_comments = M._local_pending_comments[pr_number]
+              if pending_comments then
+                for _, pc in ipairs(pending_comments) do
+                  if pc.id == comment.id then
+                    pc.body = text
+                    pc.created_at = os.date("!%Y-%m-%dT%H:%M:%SZ") -- Update timestamp
+                    break
+                  end
+                end
+              end
+
+              -- Save session to persist changes
+              save_session()
+
+              vim.notify("✅ Local pending comment updated", vim.log.levels.INFO)
+              M.load_comments_for_buffer(bufnr, false)
+            else
+              -- It's a GitHub comment, use API
+              vim.notify("Updating comment...", vim.log.levels.INFO)
+              github.edit_comment(pr_number, comment.id, text, function(ok, edit_err)
+                if ok then
+                  vim.notify("✅ Comment updated", vim.log.levels.INFO)
+                  M.load_comments_for_buffer(bufnr, true)
+                else
+                  vim.notify("❌ Failed to edit: " .. (edit_err or "unknown"), vim.log.levels.ERROR)
+                end
+              end)
+            end
+          end
+        end, { buffer = buf })
+
+        -- Enter insert mode automatically
+        vim.cmd("startinsert")
+      end
+
+      -- Thread is now shown inline in the edit buffer
+      open_edit_buffer()
     end
 
     if #my_comments == 1 then
@@ -1923,14 +2768,29 @@ function M.delete_my_comment()
       vim.ui.select({ "Yes", "No" }, { prompt = "Delete this comment?" }, function(choice)
         if choice == "Yes" then
           vim.notify("Deleting comment...", vim.log.levels.INFO)
-          github.delete_comment(pr_number, comment.id, function(ok, del_err)
-            if ok then
-              vim.notify("✅ Comment deleted", vim.log.levels.INFO)
+
+          -- Check if it's a local pending comment
+          if comment.is_local then
+            local removed = remove_local_pending_comment(pr_number, comment.id)
+            if removed then
+              -- Save session to persist changes
+              save_session()
+              vim.notify("✅ Local pending comment deleted", vim.log.levels.INFO)
               M.load_comments_for_buffer(bufnr, true)
             else
-              vim.notify("❌ Failed to delete: " .. (del_err or "unknown"), vim.log.levels.ERROR)
+              vim.notify("❌ Failed to delete local comment", vim.log.levels.ERROR)
             end
-          end)
+          else
+            -- It's a GitHub comment, use API
+            github.delete_comment(pr_number, comment.id, function(ok, del_err)
+              if ok then
+                vim.notify("✅ Comment deleted", vim.log.levels.INFO)
+                M.load_comments_for_buffer(bufnr, true)
+              else
+                vim.notify("❌ Failed to delete: " .. (del_err or "unknown"), vim.log.levels.ERROR)
+              end
+            end)
+          end
         end
       end)
     end
@@ -1976,6 +2836,7 @@ function M.load_last_session()
   vim.g.pr_review_previous_branch = session_data.previous_branch
   vim.g.pr_review_modified_files = session_data.modified_files
   M._viewed_files = session_data.viewed_files or {}
+  M._local_pending_comments = session_data.pending_comments or {}
 
   -- Open review buffer and first file
   M.open_review_buffer(function()
@@ -2236,19 +3097,57 @@ function M.list_review_requests()
 end
 
 function M._start_review_for_pr(pr)
+  -- Check if already in review mode for a different PR
+  if vim.g.pr_review_number and vim.g.pr_review_number ~= pr.number then
+    vim.notify(string.format("Cleaning up current review (PR #%d) to start PR #%d...",
+                             vim.g.pr_review_number, pr.number), vim.log.levels.INFO)
+    M.cleanup_review_branch()
+    -- Wait a bit for cleanup to complete
+    vim.defer_fn(function()
+      M._start_review_for_pr(pr)
+    end, 500)
+    return
+  end
+
   local current_branch = git.get_current_branch()
   if current_branch then
     vim.g.pr_review_previous_branch = current_branch
   end
 
+  vim.notify("Starting review for PR #" .. pr.number .. "...", vim.log.levels.INFO)
+
+  -- For fork PRs, get the correct branch name using gh pr view
+  if pr.head_repo_owner then
+    vim.notify(string.format("Debug: Detected fork PR, owner=%s, getting details...", pr.head_repo_owner), vim.log.levels.INFO)
+    github.get_pr_details(pr.number, function(details, err)
+      if err or not details then
+        vim.notify("Error getting PR details: " .. (err or "unknown"), vim.log.levels.ERROR)
+        return
+      end
+
+      vim.notify(string.format("Debug: Got branch %s, was %s", details.head_branch, pr.head_branch), vim.log.levels.INFO)
+
+      -- Update PR with correct branch from details
+      pr.head_branch = details.head_branch
+      pr.head_label = details.head_label
+
+      M._do_start_review(pr)
+    end)
+  else
+    vim.notify("Debug: Not a fork PR, using branch as-is", vim.log.levels.INFO)
+    M._do_start_review(pr)
+  end
+end
+
+function M._do_start_review(pr)
+  -- Use head_label for fork PRs (includes owner:branch), replace : with -
+  local head_ref = (pr.head_label or pr.head_branch):gsub(":", "-")
   local review_branch = string.format(
     "%s%s_to_%s",
     M.config.branch_prefix,
-    pr.head_branch,
+    head_ref,
     pr.base_branch
   )
-
-  vim.notify("Starting review for PR #" .. pr.number .. "...", vim.log.levels.INFO)
 
   git.fetch_all(function(fetch_ok, fetch_err)
     if not fetch_ok then
@@ -2262,7 +3161,11 @@ function M._start_review_for_pr(pr)
         return
       end
 
-      git.soft_merge(pr.head_branch, pr.head_repo_owner, function(merge_ok, merge_err, has_conflicts)
+      vim.notify(string.format("Debug: About to merge - branch=%s, owner=%s, url=%s",
+                               pr.head_branch or "nil",
+                               pr.head_repo_owner or "nil",
+                               pr.head_repo_url or "nil"), vim.log.levels.INFO)
+      git.soft_merge(pr.head_branch, pr.head_repo_owner, pr.head_repo_url, function(merge_ok, merge_err, has_conflicts)
         if not merge_ok then
           vim.notify("Error during soft merge: " .. (merge_err or "unknown"), vim.log.levels.ERROR)
           return
@@ -2347,6 +3250,10 @@ function M.setup(opts)
     M.add_pending_comment()
   end, { desc = "Add a pending review comment (posted with approval/rejection)" })
 
+  vim.api.nvim_create_user_command("PRListPendingComments", function()
+    M.list_pending_comments()
+  end, { desc = "List all pending comments and navigate to selected one" })
+
   vim.api.nvim_create_user_command("PRReply", function()
     M.reply_to_comment()
   end, { desc = "Reply to a comment on the current line" })
@@ -2362,6 +3269,10 @@ function M.setup(opts)
   vim.api.nvim_create_user_command("PRReviewMenu", function()
     M.show_review_menu()
   end, { desc = "Show PR Reviewer command menu" })
+
+  vim.api.nvim_create_user_command("PR", function()
+    M.show_review_menu()
+  end, { desc = "Show PR Reviewer command menu (alias for PRReviewMenu)" })
 
   vim.api.nvim_create_user_command("PRListReviewRequests", function()
     M.list_review_requests()
@@ -2485,67 +3396,98 @@ function M.review_pr()
         vim.g.pr_review_previous_branch = current_branch
       end
 
-      local review_branch = string.format(
-        "%s%s_to_%s",
-        M.config.branch_prefix,
-        pr.head_branch,
-        pr.base_branch
-      )
-
-      git.fetch_all(function(fetch_ok, fetch_err)
-        if not fetch_ok then
-          vim.notify("Error fetching: " .. (fetch_err or "unknown"), vim.log.levels.ERROR)
-          return
-        end
-
-        git.create_review_branch(review_branch, pr.base_branch, function(ok, create_err)
-          if not ok then
-            vim.notify("Error creating branch: " .. (create_err or "unknown"), vim.log.levels.ERROR)
+      -- For fork PRs, get the correct branch name using gh pr view
+      if pr.head_repo_owner then
+        vim.notify(string.format("Debug: Detected fork PR, owner=%s, getting details...", pr.head_repo_owner), vim.log.levels.INFO)
+        github.get_pr_details(pr.number, function(details, err)
+          if err or not details then
+            vim.notify("Error getting PR details: " .. (err or "unknown"), vim.log.levels.ERROR)
             return
           end
 
-          git.soft_merge(pr.head_branch, pr.head_repo_owner, function(merge_ok, merge_err, has_conflicts)
-            if not merge_ok then
-              vim.notify("Error during soft merge: " .. (merge_err or "unknown"), vim.log.levels.ERROR)
-              return
-            end
+          vim.notify(string.format("Debug: Got branch %s, was %s", details.head_branch, pr.head_branch), vim.log.levels.INFO)
 
-            vim.g.pr_review_number = pr.number
+          -- Update PR with correct branch from details
+          pr.head_branch = details.head_branch
+          pr.head_label = details.head_label
 
-            if has_conflicts then
-              vim.notify(
-                string.format("⚠️  PR #%s has merge conflicts. Review will show conflicted state.", pr.number),
-                vim.log.levels.WARN
-              )
-            else
-              vim.notify(
-                string.format("✅ Ready to review PR #%s: %s", pr.number, pr.title),
-                vim.log.levels.INFO
-              )
-            end
+          vim.notify("Debug: About to call _do_review_pr_with_branch", vim.log.levels.INFO)
+          M._do_review_pr_with_branch(pr)
+        end)
+      else
+        vim.notify("Debug: Not a fork PR, using branch as-is", vim.log.levels.INFO)
+        M._do_review_pr_with_branch(pr)
+      end
+    end)
+  end)
+end
 
-            git.get_modified_files_with_lines(function(files)
-              if files and #files > 0 then
-                vim.g.pr_review_modified_files = vim.tbl_map(function(f)
-                  return { path = f.path, status = f.status }
-                end, files)
+function M._do_review_pr_with_branch(pr)
+  -- Use head_label for fork PRs (includes owner:branch), replace : with -
+  local head_ref = (pr.head_label or pr.head_branch):gsub(":", "-")
+  local review_branch = string.format(
+    "%s%s_to_%s",
+    M.config.branch_prefix,
+    head_ref,
+    pr.base_branch
+  )
 
-                -- Save initial session
-                save_session()
+  git.fetch_all(function(fetch_ok, fetch_err)
+    if not fetch_ok then
+      vim.notify("Error fetching: " .. (fetch_err or "unknown"), vim.log.levels.ERROR)
+      return
+    end
 
-                -- Open review buffer and first file
-                M.open_review_buffer(function()
-                  if M.config.open_files_on_review then
-                    -- Use the ordered list (same order as ReviewBuffer)
-                    local first_file = #M._review_files_ordered > 0 and M._review_files_ordered[1] or M._review_files[1]
-                    if first_file then
-                      open_file_safe(first_file, nil)
-                    end
-                  end
-                end)
+    git.create_review_branch(review_branch, pr.base_branch, function(ok, create_err)
+      if not ok then
+        vim.notify("Error creating branch: " .. (create_err or "unknown"), vim.log.levels.ERROR)
+        return
+      end
+
+      vim.notify(string.format("Debug: About to merge - branch=%s, owner=%s, url=%s",
+                               pr.head_branch or "nil",
+                               pr.head_repo_owner or "nil",
+                               pr.head_repo_url or "nil"), vim.log.levels.INFO)
+      git.soft_merge(pr.head_branch, pr.head_repo_owner, pr.head_repo_url, function(merge_ok, merge_err, has_conflicts)
+        if not merge_ok then
+          vim.notify("Error during soft merge: " .. (merge_err or "unknown"), vim.log.levels.ERROR)
+          return
+        end
+
+        vim.g.pr_review_number = pr.number
+
+        if has_conflicts then
+          vim.notify(
+            string.format("⚠️  PR #%s has merge conflicts. Review will show conflicted state.", pr.number),
+            vim.log.levels.WARN
+          )
+        else
+          vim.notify(
+            string.format("✅ Ready to review PR #%s: %s", pr.number, pr.title),
+            vim.log.levels.INFO
+          )
+        end
+
+        git.get_modified_files_with_lines(function(files)
+          if files and #files > 0 then
+            vim.g.pr_review_modified_files = vim.tbl_map(function(f)
+              return { path = f.path, status = f.status }
+            end, files)
+
+            -- Save initial session
+            save_session()
+
+            -- Open review buffer and first file
+            M.open_review_buffer(function()
+              if M.config.open_files_on_review then
+                -- Use the ordered list (same order as ReviewBuffer)
+                local first_file = #M._review_files_ordered > 0 and M._review_files_ordered[1] or M._review_files[1]
+                if first_file then
+                  open_file_safe(first_file, nil)
+                end
               end
             end)
-          end)
+          end
         end)
       end)
     end)
@@ -2576,6 +3518,7 @@ function M.cleanup_review_branch()
       M._review_files = {}
       M._review_files_ordered = {}
       M._review_filter = "all"
+      M._local_pending_comments = {}
       if M._review_window and vim.api.nvim_win_is_valid(M._review_window) then
         vim.api.nvim_win_close(M._review_window, true)
       end
@@ -2588,6 +3531,7 @@ function M.cleanup_review_branch()
           vim.api.nvim_buf_clear_namespace(buf, ns_id, 0, -1)
           vim.api.nvim_buf_clear_namespace(buf, changes_ns_id, 0, -1)
           vim.api.nvim_buf_clear_namespace(buf, diff_ns_id, 0, -1)
+          vim.api.nvim_buf_clear_namespace(buf, hunk_hints_ns_id, 0, -1)
           -- Delete buffer-local keymaps
           pcall(vim.keymap.del, "n", M.config.next_hunk_key, { buffer = buf })
           pcall(vim.keymap.del, "n", M.config.prev_hunk_key, { buffer = buf })
@@ -2639,6 +3583,7 @@ function M.show_review_menu()
     sections = {
       { title = "Pull Request", items = {
         { key = "i", desc = "PR Info", cmd = function() M.show_pr_info() end },
+        { key = "o", desc = "Open PR in Browser", cmd = function() M.open_pr() end },
         { key = "c", desc = "Comment on PR", cmd = function() M.add_comment() end },
         { key = "a", desc = "Approve PR", cmd = function() M.approve_pr() end },
         { key = "x", desc = "Request Changes", cmd = function() M.request_changes() end },

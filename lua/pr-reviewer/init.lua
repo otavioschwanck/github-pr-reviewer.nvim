@@ -17,6 +17,7 @@ M.config = {
   prev_hunk_key = "<C-k>", -- key to jump to previous hunk
   next_file_key = "<C-l>", -- key to go to next file in quickfix
   prev_file_key = "<C-h>", -- key to go to previous file in quickfix
+  diff_view_toggle_key = "<C-v>", -- toggle between unified and split diff view
 
   -- Review buffer settings
   review_buffer = {
@@ -48,6 +49,8 @@ end
 M._buffer_comments = {}
 M._buffer_changes = {}
 M._buffer_hunks = {}
+M._diff_view_mode = "unified" -- "unified" or "split"
+M._split_view_state = {} -- tracks split view buffers and windows
 M._buffer_stats = {}
 M._viewed_files = {}
 M._local_pending_comments = {} -- Local storage for pending comments (not synced to GitHub yet)
@@ -87,6 +90,7 @@ local function save_session()
 
   local session_data = {
     pr_number = vim.g.pr_review_number,
+    base_branch = vim.g.pr_review_base_branch,
     previous_branch = vim.g.pr_review_previous_branch,
     modified_files = vim.g.pr_review_modified_files,
     viewed_files = M._viewed_files,
@@ -424,121 +428,11 @@ get_inline_diff = function(file_path, status, callback)
 end
 
 -- Helper to get syntax-highlighted chunks for a line
--- Helper to create or get a combined highlight group (syntax + DiffDelete background)
-local function get_combined_hl(syntax_hl)
-  if not syntax_hl or syntax_hl == "" then
-    return "DiffDelete"
-  end
-
-  local combined_name = "DiffDelete_" .. syntax_hl:gsub("[^%w]", "_")
-
-  -- Check if highlight group already exists
-  local exists = vim.fn.hlexists(combined_name) == 1
-
-  if not exists then
-    -- Get the foreground color from the syntax highlight
-    local syntax_def = vim.api.nvim_get_hl(0, { name = syntax_hl, link = false })
-    -- Get the background color from DiffDelete
-    local diff_delete_def = vim.api.nvim_get_hl(0, { name = "DiffDelete", link = false })
-
-    -- Create combined highlight: fg from syntax, bg from DiffDelete
-    vim.api.nvim_set_hl(0, combined_name, {
-      fg = syntax_def.fg,
-      bg = diff_delete_def.bg,
-      sp = syntax_def.sp,
-      bold = syntax_def.bold,
-      italic = syntax_def.italic,
-      underline = syntax_def.underline,
-    })
-  end
-
-  return combined_name
-end
-
 local function get_syntax_highlights(text, filetype)
-  if text == "" then
-    return { { "", "DiffDelete" } }
-  end
-
-  -- Create a temporary scratch buffer
-  local temp_buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[temp_buf].filetype = filetype
-
-  -- Set the text
-  vim.api.nvim_buf_set_lines(temp_buf, 0, -1, false, { text })
-
-  -- Force treesitter/syntax to attach
-  vim.bo[temp_buf].syntax = "on"
-
-  -- Wait for highlighting to be applied
-  vim.wait(100, function() return false end)
-
-  -- Capture highlights by scanning each character position
-  local hl_map = {}
-
-  local ok = pcall(function()
-    vim.api.nvim_buf_call(temp_buf, function()
-      for col = 0, #text - 1 do
-        -- Use inspect_pos to get all highlights at this position (works with treesitter and syntax)
-        local pos_info = vim.inspect_pos(temp_buf, 0, col)
-
-        -- Try treesitter first
-        if pos_info.treesitter and #pos_info.treesitter > 0 then
-          -- Get the most specific (last) treesitter capture
-          local ts_hl = pos_info.treesitter[#pos_info.treesitter]
-          if ts_hl and ts_hl.capture then
-            hl_map[col] = "@" .. ts_hl.capture
-          end
-        -- Fallback to syntax highlighting
-        elseif pos_info.syntax and #pos_info.syntax > 0 then
-          local syn_hl = pos_info.syntax[#pos_info.syntax]
-          if syn_hl and syn_hl.hl_group then
-            hl_map[col] = syn_hl.hl_group
-          end
-        end
-      end
-    end)
-  end)
-
-  -- Build chunks from consecutive characters with same highlight
-  local chunks = {}
-  local current_hl = nil
-  local current_text = ""
-
-  for col = 0, #text - 1 do
-    local char = text:sub(col + 1, col + 1)
-    local hl = hl_map[col]
-
-    if hl ~= current_hl then
-      -- Flush previous chunk
-      if current_text ~= "" then
-        local combined = get_combined_hl(current_hl)
-        table.insert(chunks, { current_text, combined })
-      end
-      -- Start new chunk
-      current_hl = hl
-      current_text = char
-    else
-      -- Continue current chunk
-      current_text = current_text .. char
-    end
-  end
-
-  -- Flush final chunk
-  if current_text ~= "" then
-    local combined = get_combined_hl(current_hl)
-    table.insert(chunks, { current_text, combined })
-  end
-
-  -- Cleanup
-  vim.api.nvim_buf_delete(temp_buf, { force = true })
-
-  -- If no chunks were created, return the whole line with DiffDelete
-  if #chunks == 0 then
-    return { { text, "DiffDelete" } }
-  end
-
-  return chunks
+  -- Simply return text with DiffDelete highlight
+  -- Note: Syntax highlighting for deleted lines was removed due to severe performance issues
+  -- (vim.inspect_pos() for every character was extremely slow)
+  return { { text, "DiffDelete" } }
 end
 
 local function display_inline_diff(bufnr, hunks)
@@ -595,6 +489,11 @@ local function load_inline_diff_for_buffer(bufnr)
     return
   end
 
+  -- Don't load inline diff when in split view mode
+  if M._diff_view_mode == "split" then
+    return
+  end
+
   local file_path = get_relative_path(bufnr)
 
   -- Find status from review files
@@ -648,6 +547,191 @@ local function load_inline_diff_for_buffer(bufnr)
       end)
     end
   end)
+end
+
+-- Create split diff view (side by side)
+local function create_split_view(current_bufnr, file_path)
+  -- Make sure we're in the file window, not the review window
+  local current_win = vim.api.nvim_get_current_win()
+
+  -- If we're in the review window, find the file window
+  if M._review_window and current_win == M._review_window then
+    -- Find a window with the current buffer
+    for _, win in ipairs(vim.api.nvim_list_wins()) do
+      if vim.api.nvim_win_get_buf(win) == current_bufnr and win ~= M._review_window then
+        vim.api.nvim_set_current_win(win)
+        current_win = win
+        break
+      end
+    end
+  end
+
+  -- Try to get base version of the file
+  -- Build list of attempts to find the base version
+  local base_branch = vim.g.pr_review_base_branch
+  local attempts = {}
+
+  -- If we have base_branch, try it first
+  if base_branch then
+    table.insert(attempts, string.format("origin/%s:%s", base_branch, file_path))
+    table.insert(attempts, string.format("%s:%s", base_branch, file_path))
+  end
+
+  -- Fallback attempts
+  table.insert(attempts, string.format("origin/main:%s", file_path))
+  table.insert(attempts, string.format("origin/master:%s", file_path))
+  table.insert(attempts, string.format("main:%s", file_path))
+  table.insert(attempts, string.format("master:%s", file_path))
+  table.insert(attempts, string.format("HEAD~1:%s", file_path))
+
+  local base_content
+  local success = false
+
+  for _, attempt in ipairs(attempts) do
+    local cmd = "git show " .. attempt
+    base_content = vim.fn.systemlist(cmd)
+    if vim.v.shell_error == 0 then
+      success = true
+      debug_log("Split view: Using base from " .. attempt)
+      break
+    end
+  end
+
+  -- If all attempts failed, file might be new
+  if not success then
+    base_content = {}
+    debug_log("Split view: File appears to be new, using empty base")
+  end
+
+  -- Create a new buffer for base version
+  local base_buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(base_buf, 0, -1, false, base_content)
+  vim.bo[base_buf].filetype = vim.bo[current_bufnr].filetype
+  vim.bo[base_buf].buftype = "nofile"
+  vim.bo[base_buf].modifiable = false
+
+  -- Set buffer name
+  vim.api.nvim_buf_set_name(base_buf, string.format("[BEFORE] %s", file_path))
+
+  -- Create vertical split to the left
+  vim.cmd("leftabove vsplit")
+  local left_win = vim.api.nvim_get_current_win()
+
+  -- Show base version (BEFORE) in left window
+  vim.api.nvim_win_set_buf(left_win, base_buf)
+
+  -- Go to right window and show current version (AFTER)
+  vim.cmd("wincmd l")
+  local right_win = vim.api.nvim_get_current_win()
+
+  -- Make sure current buffer is shown (should already be, but ensure it)
+  if vim.api.nvim_win_get_buf(right_win) ~= current_bufnr then
+    vim.api.nvim_win_set_buf(right_win, current_bufnr)
+  end
+
+  -- Reload the file to ensure we have the latest version
+  vim.api.nvim_buf_call(current_bufnr, function()
+    vim.cmd("edit!")
+  end)
+
+  -- Clear inline diff from the current buffer (we don't need it in split view)
+  vim.api.nvim_buf_clear_namespace(current_bufnr, diff_ns_id, 0, -1)
+
+  -- Enable diff mode in both windows
+  vim.api.nvim_win_call(left_win, function()
+    vim.cmd("diffthis")
+    vim.wo.foldenable = false  -- Disable folding
+  end)
+  vim.api.nvim_win_call(right_win, function()
+    vim.cmd("diffthis")
+    vim.wo.foldenable = false  -- Disable folding
+  end)
+
+  -- Force diff update
+  vim.cmd("diffupdate")
+
+  -- Store split view state
+  M._split_view_state = {
+    base_buf = base_buf,
+    current_buf = current_bufnr,
+    left_win = left_win,
+    right_win = right_win,
+    original_win = current_win,
+    file_path = file_path,
+  }
+
+  vim.notify("Split view enabled - Press " .. M.config.diff_view_toggle_key .. " to return to unified view", vim.log.levels.INFO)
+end
+
+local function restore_unified_view(bufnr)
+  if not M._split_view_state or not M._split_view_state.base_buf then
+    return
+  end
+
+  local state = M._split_view_state
+
+  -- Disable diff mode
+  if vim.api.nvim_win_is_valid(state.left_win) then
+    vim.api.nvim_win_call(state.left_win, function()
+      vim.cmd("diffoff")
+    end)
+  end
+  if vim.api.nvim_win_is_valid(state.right_win) then
+    vim.api.nvim_win_call(state.right_win, function()
+      vim.cmd("diffoff")
+    end)
+  end
+
+  -- Close left window (base version)
+  if vim.api.nvim_win_is_valid(state.left_win) then
+    vim.api.nvim_win_close(state.left_win, true)
+  end
+
+  -- Delete base buffer
+  if vim.api.nvim_buf_is_valid(state.base_buf) then
+    vim.api.nvim_buf_delete(state.base_buf, { force = true })
+  end
+
+  -- Make sure we're in the current version window
+  if vim.api.nvim_win_is_valid(state.right_win) then
+    vim.api.nvim_set_current_win(state.right_win)
+  end
+
+  -- Reload inline diff for the buffer
+  if state.current_buf and vim.api.nvim_buf_is_valid(state.current_buf) then
+    load_inline_diff_for_buffer(state.current_buf)
+  end
+
+  -- Clear state
+  M._split_view_state = {}
+
+  vim.notify("Unified view restored", vim.log.levels.INFO)
+end
+
+-- Toggle between unified and split diff view
+function M.toggle_diff_view()
+  if not vim.g.pr_review_number then
+    vim.notify("Not in PR review mode", vim.log.levels.WARN)
+    return
+  end
+
+  local bufnr = vim.api.nvim_get_current_buf()
+  local file_path = get_relative_path(bufnr)
+
+  if not file_path then
+    vim.notify("Not a tracked file in PR review", vim.log.levels.WARN)
+    return
+  end
+
+  if M._diff_view_mode == "unified" then
+    -- Switch to split view
+    M._diff_view_mode = "split"
+    create_split_view(bufnr, file_path)
+  else
+    -- Switch back to unified view
+    M._diff_view_mode = "unified"
+    restore_unified_view(bufnr)
+  end
 end
 
 local function close_float_wins()
@@ -965,8 +1049,28 @@ local function open_file_from_review(split_type)
     return
   end
 
+  -- If in split mode, restore unified before opening new file
+  local was_split = M._diff_view_mode == "split"
+  if was_split then
+    restore_unified_view()
+  end
+
   -- Use the safe open function with split command
   open_file_safe(file, split_type)
+
+  -- If was in split mode, recreate split for new file
+  if was_split and not split_type then  -- Only if not opening in split/vsplit
+    vim.defer_fn(function()
+      if vim.api.nvim_buf_is_valid(vim.api.nvim_get_current_buf()) then
+        local new_bufnr = vim.api.nvim_get_current_buf()
+        local file_path = get_relative_path(new_bufnr)
+        if file_path then
+          M._diff_view_mode = "unified"  -- Reset to unified first
+          M.toggle_diff_view()  -- Then toggle to split
+        end
+      end
+    end, 50)
+  end
 end
 
 -- Toggle filter
@@ -1256,6 +1360,7 @@ update_changes_float = function()
   table.insert(keymap_lines, string.format(" %s: Next file ", M.config.next_file_key))
   table.insert(keymap_lines, string.format(" %s: Prev file ", M.config.prev_file_key))
   table.insert(keymap_lines, string.format(" %s: Mark viewed ", M.config.mark_as_viewed_key))
+  table.insert(keymap_lines, string.format(" %s: Toggle split ", M.config.diff_view_toggle_key))
 
   -- Helper to create/update float
   local function create_or_update_float(win_var, lines, row_offset, highlight)
@@ -1443,7 +1548,28 @@ function M.next_file()
   end
 
   local next_file = file_list[current_idx + 1]
+
+  -- If in split mode, restore unified before opening next file
+  local was_split = M._diff_view_mode == "split"
+  if was_split then
+    restore_unified_view()
+  end
+
   open_file_safe(next_file, nil)
+
+  -- If was in split mode, recreate split for new file
+  if was_split then
+    vim.defer_fn(function()
+      if vim.api.nvim_buf_is_valid(vim.api.nvim_get_current_buf()) then
+        local bufnr = vim.api.nvim_get_current_buf()
+        local file_path = get_relative_path(bufnr)
+        if file_path then
+          M._diff_view_mode = "unified"  -- Reset to unified first
+          M.toggle_diff_view()  -- Then toggle to split
+        end
+      end
+    end, 50)
+  end
 end
 
 function M.prev_file()
@@ -1478,7 +1604,28 @@ function M.prev_file()
   end
 
   local prev_file = file_list[current_idx - 1]
+
+  -- If in split mode, restore unified before opening prev file
+  local was_split = M._diff_view_mode == "split"
+  if was_split then
+    restore_unified_view()
+  end
+
   open_file_safe(prev_file, nil)
+
+  -- If was in split mode, recreate split for new file
+  if was_split then
+    vim.defer_fn(function()
+      if vim.api.nvim_buf_is_valid(vim.api.nvim_get_current_buf()) then
+        local bufnr = vim.api.nvim_get_current_buf()
+        local file_path = get_relative_path(bufnr)
+        if file_path then
+          M._diff_view_mode = "unified"  -- Reset to unified first
+          M.toggle_diff_view()  -- Then toggle to split
+        end
+      end
+    end, 50)
+  end
 end
 
 -- Add navigation hints as virtual text for current hunk
@@ -1600,6 +1747,7 @@ local function load_changes_for_buffer(bufnr)
         vim.keymap.set("n", M.config.next_hunk_key, M.next_hunk, { buffer = bufnr, desc = "Jump to next hunk" })
         vim.keymap.set("n", M.config.prev_hunk_key, M.prev_hunk, { buffer = bufnr, desc = "Jump to previous hunk" })
         vim.keymap.set("n", M.config.mark_as_viewed_key, M.mark_file_as_viewed_and_next, { buffer = bufnr, desc = "Mark as viewed and next" })
+        vim.keymap.set("n", M.config.diff_view_toggle_key, M.toggle_diff_view, { buffer = bufnr, desc = "Toggle unified/split diff view" })
         M._buffer_keymaps_saved[bufnr] = true
       end
 
@@ -3198,6 +3346,7 @@ function M.load_last_session()
 
   -- Restore global state
   vim.g.pr_review_number = session_data.pr_number
+  vim.g.pr_review_base_branch = session_data.base_branch
   vim.g.pr_review_previous_branch = session_data.previous_branch
   vim.g.pr_review_modified_files = session_data.modified_files
   M._viewed_files = session_data.viewed_files or {}
@@ -3583,6 +3732,7 @@ function M._do_start_review(pr)
         end
 
         vim.g.pr_review_number = pr.number
+        vim.g.pr_review_base_branch = pr.base_branch
 
         if has_conflicts then
           vim.notify(
@@ -3765,7 +3915,10 @@ function M.setup(opts)
       if vim.g.pr_review_number then
         M.load_comments_for_buffer(args.buf)
         load_changes_for_buffer(args.buf)
-        load_inline_diff_for_buffer(args.buf)
+        -- Don't load inline diff when in split view mode
+        if M._diff_view_mode ~= "split" then
+          load_inline_diff_for_buffer(args.buf)
+        end
 
         -- Update review buffer to highlight current file
         M.refresh_review_buffer()
@@ -3920,6 +4073,7 @@ function M._do_review_pr_with_branch(pr)
         end
 
         vim.g.pr_review_number = pr.number
+        vim.g.pr_review_base_branch = pr.base_branch
 
         if has_conflicts then
           vim.notify(
@@ -3972,6 +4126,7 @@ function M.cleanup_review_branch()
     if ok then
       delete_session()
       vim.g.pr_review_number = nil
+      vim.g.pr_review_base_branch = nil
       github.clear_cache()
       M._buffer_comments = {}
       M._buffer_changes = {}
@@ -3991,6 +4146,13 @@ function M.cleanup_review_branch()
       M._review_buffer = nil
       close_float_wins()
 
+      -- Restore unified view if in split mode
+      if M._diff_view_mode == "split" then
+        restore_unified_view()
+      end
+      M._diff_view_mode = "unified"
+      M._split_view_state = {}
+
       for _, buf in ipairs(vim.api.nvim_list_bufs()) do
         if vim.api.nvim_buf_is_valid(buf) then
           vim.api.nvim_buf_clear_namespace(buf, ns_id, 0, -1)
@@ -4001,6 +4163,7 @@ function M.cleanup_review_branch()
           pcall(vim.keymap.del, "n", M.config.next_hunk_key, { buffer = buf })
           pcall(vim.keymap.del, "n", M.config.prev_hunk_key, { buffer = buf })
           pcall(vim.keymap.del, "n", M.config.mark_as_viewed_key, { buffer = buf })
+          pcall(vim.keymap.del, "n", M.config.diff_view_toggle_key, { buffer = buf })
         end
       end
 

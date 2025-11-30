@@ -1,32 +1,33 @@
-*pr-reviewer.txt*    GitHub Pull Request Reviewer for Neovim
+*github-pr-reviewer.txt*    GitHub Pull Request Reviewer for Neovim
 
-                           PR REVIEWER~
+                      GITHUB PR REVIEWER~
 
 Author:  Your Name
 License: MIT
-Repository: https://github.com/otavioschwanck/pr-reviewer.nvim
+Repository: https://github.com/otavioschwanck/github-pr-reviewer.nvim
 
 ==============================================================================
-CONTENTS                                            *pr-reviewer-contents*
+CONTENTS                                            *github-pr-reviewer-contents*
 
-    1. Introduction ...................... |pr-reviewer-intro|
-    2. Requirements ...................... |pr-reviewer-requirements|
-    3. Installation ...................... |pr-reviewer-installation|
-    4. Quick Start ....................... |pr-reviewer-quickstart|
-    5. Commands .......................... |pr-reviewer-commands|
-    6. Configuration ..................... |pr-reviewer-config|
-    7. Workflows ......................... |pr-reviewer-workflows|
-    8. Keymaps ........................... |pr-reviewer-keymaps|
-    9. Integration ....................... |pr-reviewer-integration|
-   10. Troubleshooting ................... |pr-reviewer-troubleshooting|
-   11. License ........................... |pr-reviewer-license|
+    1. Introduction ...................... |github-pr-reviewer-intro|
+    2. Requirements ...................... |github-pr-reviewer-requirements|
+    3. Installation ...................... |github-pr-reviewer-installation|
+    4. Quick Start ....................... |github-pr-reviewer-quickstart|
+    5. Commands .......................... |github-pr-reviewer-commands|
+    6. Configuration ..................... |github-pr-reviewer-config|
+    7. Workflows ......................... |github-pr-reviewer-workflows|
+    8. Keymaps ........................... |github-pr-reviewer-keymaps|
+    9. Integration ....................... |github-pr-reviewer-integration|
+   10. Troubleshooting ................... |github-pr-reviewer-troubleshooting|
+   11. License ........................... |github-pr-reviewer-license|
 
 ==============================================================================
-1. INTRODUCTION                                        *pr-reviewer-intro*
+1. INTRODUCTION                                        *github-pr-reviewer-intro*
 
-PR Reviewer is a powerful Neovim plugin for reviewing GitHub Pull Requests
-directly in your editor. Review PRs with the full power of your development
-environment - LSP, navigation, favorite files, and all your familiar tools.
+GitHub PR Reviewer is a powerful Neovim plugin for reviewing GitHub Pull
+Requests directly in your editor. Review PRs with the full power of your
+development environment - LSP, navigation, favorite files, and all your
+familiar tools.
 
 WHY THIS PLUGIN?~
 
@@ -44,7 +45,7 @@ Review faster, review better. Use the same environment where you write code
 to review it.
 
 ==============================================================================
-2. REQUIREMENTS                                   *pr-reviewer-requirements*
+2. REQUIREMENTS                                   *github-pr-reviewer-requirements*
 
 • Neovim >= 0.9.0
 • GitHub CLI (`gh`) installed and authenticated
@@ -52,14 +53,14 @@ to review it.
 • Optional: bat for syntax-highlighted previews in fzf-lua
 
 ==============================================================================
-3. INSTALLATION                                   *pr-reviewer-installation*
+3. INSTALLATION                                   *github-pr-reviewer-installation*
 
 Using lazy.nvim: >lua
     {
-      "otavioschwanck/pr-reviewer.nvim",
+      "otavioschwanck/github-pr-reviewer.nvim",
       config = function()
-        require("pr-reviewer").setup({
-          -- options (see |pr-reviewer-config|)
+        require("github-pr-reviewer").setup({
+          -- options (see |github-pr-reviewer-config|)
         })
       end,
     }
@@ -67,9 +68,9 @@ Using lazy.nvim: >lua
 
 Using packer.nvim: >lua
     use {
-      "otavioschwanck/pr-reviewer.nvim",
+      "otavioschwanck/github-pr-reviewer.nvim",
       config = function()
-        require("pr-reviewer").setup()
+        require("github-pr-reviewer").setup()
       end
     }
 <
@@ -77,7 +78,7 @@ Using packer.nvim: >lua
 After installation, run `:helptags ALL` to generate help tags.
 
 ==============================================================================
-4. QUICK START                                      *pr-reviewer-quickstart*
+4. QUICK START                                      *github-pr-reviewer-quickstart*
 
 1. Make sure you have no uncommitted changes
 2. Run |:PRListReviewRequests| to see PRs requesting your review
@@ -89,7 +90,7 @@ After installation, run `:helptags ALL` to generate help tags.
 8. Clean up with |:PRReviewCleanup|
 
 ==============================================================================
-5. COMMANDS                                          *pr-reviewer-commands*
+5. COMMANDS                                          *github-pr-reviewer-commands*
 
 MAIN MENU~
                                                      *:PR*
@@ -195,11 +196,11 @@ REVIEW ACTIONS~
                         review.
 
 ==============================================================================
-6. CONFIGURATION                                       *pr-reviewer-config*
+6. CONFIGURATION                                       *github-pr-reviewer-config*
 
 Configure the plugin by calling the setup function: >lua
 
-    require("pr-reviewer").setup({
+    require("github-pr-reviewer").setup({
       -- Prefix for review branches
       branch_prefix = "reviewing_",
 
@@ -218,8 +219,17 @@ Configure the plugin by calling the setup function: >lua
       -- Show inline diff in buffers
       show_inline_diff = true,
 
+      -- Show floating windows with PR info, stats, and keymaps
+      show_floats = true,
+
       -- Key to mark file as viewed and go to next file
       mark_as_viewed_key = "<CR>",
+
+      -- Key to toggle between unified and split diff view
+      diff_view_toggle_key = "<C-v>",
+
+      -- Key to toggle floating windows visibility
+      toggle_floats_key = "<C-r>",
 
       -- Key to jump to next hunk
       next_hunk_key = "<C-j>",
@@ -236,62 +246,78 @@ Configure the plugin by calling the setup function: >lua
 <
 
 OPTIONS~
-                                                     *pr-reviewer.branch_prefix*
+                                                     *github-pr-reviewer.branch_prefix*
 branch_prefix           (string, default: "reviewing_")
                         Prefix for review branches. Review branches are
                         named as: `{prefix}{head_branch}_to_{base_branch}`
 
-                                                     *pr-reviewer.picker*
+                                                     *github-pr-reviewer.picker*
 picker                  (string, default: "native")
                         Picker to use for PR selection and other lists.
                         Options: "native", "fzf-lua", "telescope"
 
-                                                     *pr-reviewer.open_files_on_review*
+                                                     *github-pr-reviewer.open_files_on_review*
 open_files_on_review    (boolean, default: true)
                         Open modified files in quickfix list after
                         starting a review.
 
-                                                     *pr-reviewer.show_comments*
+                                                     *github-pr-reviewer.show_comments*
 show_comments           (boolean, default: true)
                         Show PR comments as virtual text in buffers.
 
-                                                     *pr-reviewer.show_icons*
+                                                     *github-pr-reviewer.show_icons*
 show_icons              (boolean, default: true)
                         Show icons/emojis in UI. Set to false for a
                         text-only interface.
 
-                                                     *pr-reviewer.show_inline_diff*
+                                                     *github-pr-reviewer.show_inline_diff*
 show_inline_diff        (boolean, default: true)
                         Show inline diff in buffers. Removed lines appear
                         as virtual text above changes.
 
-                                                     *pr-reviewer.mark_as_viewed_key*
+                                                     *github-pr-reviewer.show_floats*
+show_floats             (boolean, default: true)
+                        Show floating windows with PR info, stats, and
+                        keymaps during review. Can be toggled on/off with
+                        |github-pr-reviewer.toggle_floats_key|.
+
+                                                     *github-pr-reviewer.mark_as_viewed_key*
 mark_as_viewed_key      (string, default: "<CR>")
                         Key to mark file as viewed and jump to next file.
                         Only works in review mode.
 
-                                                     *pr-reviewer.next_hunk_key*
+                                                     *github-pr-reviewer.diff_view_toggle_key*
+diff_view_toggle_key    (string, default: "<C-v>")
+                        Key to toggle between unified (inline) and split
+                        (side-by-side) diff view. Only works in review mode.
+
+                                                     *github-pr-reviewer.toggle_floats_key*
+toggle_floats_key       (string, default: "<C-r>")
+                        Key to toggle floating windows visibility. Only
+                        works in review mode.
+
+                                                     *github-pr-reviewer.next_hunk_key*
 next_hunk_key           (string, default: "<C-j>")
                         Key to jump to next hunk. Only works in review
                         mode.
 
-                                                     *pr-reviewer.prev_hunk_key*
+                                                     *github-pr-reviewer.prev_hunk_key*
 prev_hunk_key           (string, default: "<C-k>")
                         Key to jump to previous hunk. Only works in
                         review mode.
 
-                                                     *pr-reviewer.next_file_key*
+                                                     *github-pr-reviewer.next_file_key*
 next_file_key           (string, default: "<C-l>")
                         Key to go to next file in quickfix. Only works
                         in review mode.
 
-                                                     *pr-reviewer.prev_file_key*
+                                                     *github-pr-reviewer.prev_file_key*
 prev_file_key           (string, default: "<C-h>")
                         Key to go to previous file in quickfix. Only
                         works in review mode.
 
 ==============================================================================
-7. WORKFLOWS                                       *pr-reviewer-workflows*
+7. WORKFLOWS                                       *github-pr-reviewer-workflows*
 
 BASIC REVIEW WORKFLOW~
 
@@ -323,7 +349,7 @@ BASIC REVIEW WORKFLOW~
 <
 
 PENDING COMMENTS WORKFLOW~
-                                                     *pr-reviewer-pending-comments*
+                                                     *github-pr-reviewer-pending-comments*
 
 The most efficient way to review is using pending comments:
 
@@ -342,7 +368,7 @@ Benefits:
 • Edit or delete pending comments before submission
 
 NAVIGATION~
-                                                     *pr-reviewer-navigation*
+                                                     *github-pr-reviewer-navigation*
 
 Hunk Navigation (within a file):
 • <C-j> (default) - Jump to next hunk
@@ -353,6 +379,10 @@ File Navigation (between modified files):
 • <C-h> (default) - Go to previous file in quickfix
 • <CR> (default) - Mark file as viewed and jump to next file
 
+View Controls:
+• <C-v> (default) - Toggle between unified and split diff view
+• <C-r> (default) - Toggle floating windows visibility
+
 Quickfix List:
 • :cnext or ]q - Go to next modified file
 • :cprev or [q - Go to previous modified file
@@ -360,32 +390,67 @@ Quickfix List:
 All keybindings are configurable and only activate during PR review mode.
 
 REVIEW BUFFER~
-                                                     *pr-reviewer-review-buffer*
+                                                     *github-pr-reviewer-review-buffer*
 
 The review buffer is an interactive file browser showing all changed files:
 
+• Foldable directories: Press <CR> on a directory to collapse/expand it
+  - ▼ = Expanded directory (showing files)
+  - ▶ = Collapsed directory (files hidden)
 • ✓ = File has been marked as viewed
 • ○ = File not yet viewed
 • Shows additions/deletions for each file
-• Press <CR> to open a file
+• Press <CR> on a file to open it
 • Press v to toggle viewed status
 • Press q to close
 • Automatically refreshes as you mark files viewed
 
 CHANGE PROGRESS INDICATOR~
-                                                     *pr-reviewer-progress-indicator*
+                                                     *github-pr-reviewer-progress-indicator*
 
-When reviewing a file with changes, a floating indicator shows:
+When reviewing a file with changes, three floating windows provide context:
 
+Left Float (Progress):
 • Viewed status - Shows if the file has been marked as viewed
 • Change progress - Current change position (e.g., "2/5 changes")
-• Stats - +additions ~modifications -deletions
-• Comments - Number of posted PR comments in this file
-• Pending - Number of pending comments you've drafted
 • Mark as viewed - Key to mark file as viewed
 
+Middle Float (Stats):
+• Stats - +additions ~modifications -deletions
+• Comments - 💬 Number of posted PR comments in this file
+• Pending - 💭 Number of pending comments you've drafted
+
+Right Float (Keymaps):
+• Shows available keyboard shortcuts for review mode
+
+Toggle Floating Windows:
+• Press <C-r> (default) to hide/show all three floating windows
+• Set show_floats = false in config to disable them by default
+• Useful when you want a cleaner view or need more screen space
+
+SPLIT DIFF VIEW~
+                                                     *github-pr-reviewer-split-diff*
+
+Toggle between unified (inline) and split (side-by-side) diff view with
+<C-v> (default):
+
+Unified View (Default):
+• Shows changes inline with diff highlighting
+• Deleted lines appear as virtual text above changes
+• Added/modified lines highlighted in green
+
+Split View:
+• Left window: Base version (before changes)
+• Right window: Current version (after changes)
+• Both windows in diff mode with synchronized scrolling
+• No inline diff markers needed - native Vim diff highlighting
+
+The split view makes it easier to compare larger changes side-by-side.
+Press <C-v> again to return to unified view. The view mode persists as you
+navigate between files with <C-l>/<C-h>.
+
 SESSION PERSISTENCE~
-                                                     *pr-reviewer-session*
+                                                     *github-pr-reviewer-session*
 
 The plugin automatically saves your review session state:
 
@@ -400,10 +465,10 @@ Restore a session after restarting Neovim: >vim
 <
 
 Session files are stored in:
-    ~/.local/share/nvim/pr-reviewer-sessions/
+    ~/.local/share/nvim/github-pr-reviewer-sessions/
 
 ==============================================================================
-8. KEYMAPS                                           *pr-reviewer-keymaps*
+8. KEYMAPS                                           *github-pr-reviewer-keymaps*
 
 RECOMMENDED KEYMAPS~
 
@@ -460,13 +525,15 @@ mode (they won't interfere with normal usage):
 • <C-k> (configurable) - Jump to previous hunk
 • <C-l> (configurable) - Go to next file in quickfix
 • <C-h> (configurable) - Go to previous file in quickfix
+• <C-v> (configurable) - Toggle between unified and split diff view
+• <C-r> (configurable) - Toggle floating windows visibility
 
 ==============================================================================
-9. INTEGRATION                                   *pr-reviewer-integration*
+9. INTEGRATION                                   *github-pr-reviewer-integration*
 
 ARROW.NVIM / HARPOON~
-                                                     *pr-reviewer-arrow*
-                                                     *pr-reviewer-harpoon*
+                                                     *github-pr-reviewer-arrow*
+                                                     *github-pr-reviewer-harpoon*
 
 Mark files you want to return to during review: >lua
 
@@ -481,7 +548,7 @@ Both plugins work seamlessly during PR review, letting you mark important
 files and jump between them quickly.
 
 LSP~
-                                                     *pr-reviewer-lsp*
+                                                     *github-pr-reviewer-lsp*
 
 Your LSP is fully functional during PR review:
 • gd - Go to definition
@@ -494,12 +561,12 @@ This is a huge advantage over web-based PR review - you can explore the
 full codebase with full language intelligence.
 
 TELESCOPE / FZF-LUA~
-                                                     *pr-reviewer-telescope*
-                                                     *pr-reviewer-fzf-lua*
+                                                     *github-pr-reviewer-telescope*
+                                                     *github-pr-reviewer-fzf-lua*
 
 Set your preferred picker in the config: >lua
 
-    require("pr-reviewer").setup({
+    require("github-pr-reviewer").setup({
       picker = "telescope",  -- or "fzf-lua" or "native"
     })
 <
@@ -510,7 +577,7 @@ Telescope and fzf-lua provide enhanced comment browsing with file previews:
 • fzf-lua: File preview with bat/cat showing context around the comment
 
 GITSIGNS.NVIM~
-                                                     *pr-reviewer-gitsigns*
+                                                     *github-pr-reviewer-gitsigns*
 
 gitsigns.nvim is optional - the plugin has built-in inline diff
 visualization. However, gitsigns can still be useful for:
@@ -521,7 +588,7 @@ visualization. However, gitsigns can still be useful for:
 
 To use gitsigns instead of built-in inline diff: >lua
 
-    require("pr-reviewer").setup({
+    require("github-pr-reviewer").setup({
       show_inline_diff = false,
     })
 
@@ -531,7 +598,7 @@ To use gitsigns instead of built-in inline diff: >lua
 <
 
 ==============================================================================
-10. TROUBLESHOOTING                          *pr-reviewer-troubleshooting*
+10. TROUBLESHOOTING                          *github-pr-reviewer-troubleshooting*
 
 CANNOT START REVIEW: YOU HAVE UNCOMMITTED CHANGES~
 
@@ -591,7 +658,7 @@ Install bat for syntax-highlighted previews: >bash
 If `bat` is not available, the plugin falls back to `cat`.
 
 ==============================================================================
-11. LICENSE                                          *pr-reviewer-license*
+11. LICENSE                                          *github-pr-reviewer-license*
 
 MIT License
 

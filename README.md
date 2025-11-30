@@ -1,6 +1,10 @@
-# PR Reviewer for Neovim
+# GitHub PR Reviewer for Neovim
 
 A powerful Neovim plugin for reviewing GitHub Pull Requests directly in your editor. Review PRs with the full power of your development environment - LSP, navigation, favorite files, and all your familiar tools.
+
+## Disclaimer
+
+It is a experimental project and may contain bugs. Use at your own risk.
 
 ## Why This Plugin?
 
@@ -9,7 +13,7 @@ A powerful Neovim plugin for reviewing GitHub Pull Requests directly in your edi
 - 🚀 **Full LSP support** - Jump to definitions, find references, see type information while reviewing
 - 📁 **Your favorite navigation tools** - Use arrow.nvim, harpoon, telescope, or any file navigation plugin
 - 🔍 **See the full codebase** - Not limited to just the changed lines - explore the entire context
-- ⚡ **Efficient workflows** - Built-in keybindings for navigation, quickfix integration, and smart change tracking
+- ⚡ **Efficient workflows** - Built-in keybindings for navigation and smart change tracking
 - 💬 **Comprehensive comment management** - Add, edit, delete, reply to comments with a great UX
 - 📝 **Pending comments** - Draft comments locally and submit them all together when you're ready
 - 🎯 **Context-aware** - View conversation threads, see file previews, and navigate with ease
@@ -23,8 +27,9 @@ A powerful Neovim plugin for reviewing GitHub Pull Requests directly in your edi
 - ✅ **Session persistence** - Resume reviews after restarting Neovim
 - ✅ **Fork PR support** - Automatically handles PRs from forks
 - ✅ **Review requests** - List PRs where you're requested as reviewer with viewed status
-- ✅ **Review buffer** - Interactive file browser showing all changed files with status
-- ✅ **Change tracking** - See your progress through changes with a floating indicator
+- ✅ **Review buffer** - Interactive file browser with foldable directories
+- ✅ **Split diff view** - Toggle between unified and split (side-by-side) diff view
+- ✅ **Change tracking** - See your progress with floating indicators (toggle on/off)
 - ✅ **Inline diff** - Built-in diff visualization (no gitsigns required)
 - ✅ **Quickfix integration** - Navigate modified files with `:cnext`/`:cprev`
 
@@ -63,12 +68,14 @@ A powerful Neovim plugin for reviewing GitHub Pull Requests directly in your edi
 
 ```lua
 {
-  "otavioschwanck/pr-reviewer.nvim",
-  config = function()
-    require("pr-reviewer").setup({
-      -- options (see Configuration below)
-    })
-  end,
+  "otavioschwanck/github-pr-reviewer.nvim",
+  opts = {
+    -- options here
+  },
+  keys = {
+    { "<leader>p", "<cmd>PRReviewMenu<cr>",    desc = "PR Review Menu" },
+    { "<leader>p", "<cmd>PRSuggestChange<CR>", desc = "Suggest change", mode = "v" }
+  }
 }
 ```
 
@@ -76,9 +83,9 @@ A powerful Neovim plugin for reviewing GitHub Pull Requests directly in your edi
 
 ```lua
 use {
-  "otavioschwanck/pr-reviewer.nvim",
+  "otavioschwanck/github-pr-reviewer.nvim",
   config = function()
-    require("pr-reviewer").setup()
+    require("github-pr-reviewer").setup()
   end
 }
 ```
@@ -86,23 +93,23 @@ use {
 ### [vim-plug](https://github.com/junegunn/vim-plug)
 
 ```vim
-Plug 'otavioschwanck/pr-reviewer.nvim'
+Plug 'otavioschwanck/github-pr-reviewer.nvim'
 
 " In your init.vim or init.lua
-lua require("pr-reviewer").setup()
+lua require("github-pr-reviewer").setup()
 ```
 
 ## Configuration
 
 ```lua
-require("pr-reviewer").setup({
+require("github-pr-reviewer").setup({
   -- Prefix for review branches (default: "reviewing_")
   branch_prefix = "reviewing_",
 
   -- Picker for PR selection: "native", "fzf-lua", or "telescope"
   picker = "native",
 
-  -- Open modified files in quickfix after starting review
+  -- Open the first file automatically
   open_files_on_review = true,
 
   -- Show PR comments as virtual text in buffers
@@ -114,8 +121,17 @@ require("pr-reviewer").setup({
   -- Show inline diff in buffers (old lines as virtual text above changes)
   show_inline_diff = true,
 
+  -- Show floating windows with PR info, stats, and keymaps
+  show_floats = true,
+
   -- Key to mark file as viewed and go to next file (only works in review mode)
   mark_as_viewed_key = "<CR>",
+
+  -- Key to toggle between unified and split diff view (only works in review mode)
+  diff_view_toggle_key = "<C-v>",
+
+  -- Key to toggle floating windows visibility (only works in review mode)
+  toggle_floats_key = "<C-r>",
 
   -- Key to jump to next hunk (only works in review mode)
   next_hunk_key = "<C-j>",
@@ -163,7 +179,6 @@ require("pr-reviewer").setup({
 | `:PRReply` | Reply to a comment on the current line |
 | `:PREditComment` | Edit your comment (works for both pending and posted) |
 | `:PRDeleteComment` | Delete your comment on the current line |
-| `:PRComment` | Add a general comment to the PR |
 
 ### Review Actions
 
@@ -171,6 +186,7 @@ require("pr-reviewer").setup({
 |---------|-------------|
 | `:PRApprove` | Approve the PR (submits pending comments if any) |
 | `:PRRequestChanges` | Request changes on the PR (submits pending comments if any) |
+| `:PRComment` | Add a general comment to the PR |
 
 ## Quick Start
 
@@ -240,9 +256,10 @@ Press `:PRReviewBuffer` or use `b` in the `:PR` menu to open an interactive file
 ```
 ┌─ PR #123: Add authentication ─────────────────────┐
 │                                                    │
-│  ✓ app/auth/login.rb                   +45 -12    │
-│  ○ app/auth/session.rb                 +23 -5     │
-│  ○ spec/auth/login_spec.rb             +67 -0     │
+│  ▼ app/auth/                                       │
+│    ✓ login.rb                          +45 -12    │
+│    ○ session.rb                        +23 -5     │
+│  ▶ spec/auth/                                      │
 │  ✓ config/routes.rb                    +2 -0      │
 │                                                    │
 │  Progress: 2/4 files viewed                       │
@@ -251,10 +268,13 @@ Press `:PRReviewBuffer` or use `b` in the `:PR` menu to open an interactive file
 ```
 
 Features:
+- **Foldable directories**: Press `<CR>` on a directory to collapse/expand it
+  - **▼** = Expanded directory (showing files)
+  - **▶** = Collapsed directory (files hidden)
 - **✓** = File has been marked as viewed
 - **○** = File not yet viewed
 - Shows additions/deletions for each file
-- Press `<CR>` to open a file
+- Press `<CR>` on a file to open it
 - Press `v` to toggle viewed status
 - Press `q` to close
 - Automatically refreshes as you mark files viewed
@@ -274,31 +294,53 @@ The plugin includes built-in navigation that only works during PR review mode:
 
 All keybindings are configurable in setup and only activate during PR review mode.
 
-You can also use the quickfix list commands:
-- `:cnext` or `]q` - Go to next modified file
-- `:cprev` or `[q` - Go to previous modified file
+### Split Diff View
+
+Toggle between unified (inline) and split (side-by-side) diff view with `<C-v>` (default):
+
+**Unified View (Default)**:
+- Shows changes inline with diff highlighting
+- Deleted lines appear as virtual text above changes
+- Added/modified lines highlighted in green
+
+**Split View**:
+- Left window: Base version (before changes)
+- Right window: Current version (after changes)
+- Both windows in diff mode with synchronized scrolling
+- No inline diff markers needed - native Vim diff highlighting
+
+The split view makes it easier to compare larger changes side-by-side. Press `<C-v>` again to return to unified view. The view mode persists as you navigate between files with `<C-l>`/`<C-h>`.
 
 ### Change Progress Indicator
 
-When reviewing a file with changes, you'll see a floating indicator in the top-right corner showing:
+When reviewing a file with changes, you'll see three floating windows providing context:
 
 ```
-┌──────────────────────────┐
-│ ✓ Viewed                 │
-│ 2/5 changes              │
-│ +15 ~3 -8                │
-│ 💬 2 comments            │
-│ 📝 1 pending             │
-│ <CR>: Mark as viewed     │
-└──────────────────────────┘
+┌──────────────────────────┐  ┌─────────────┐  ┌──────────────────┐
+│ ✓ Viewed                 │  │ +15 ~3 -8   │  │ <C-j> next hunk  │
+│ 2/5 changes              │  │ 💬 2 💭 1   │  │ <C-k> prev hunk  │
+│ <CR>: Mark as viewed     │  └─────────────┘  │ <C-v> split view │
+└──────────────────────────┘                   │ <C-r> hide floats│
+                                               └──────────────────┘
 ```
 
+**Left Float (Progress)**:
 - **Viewed status**: Shows if the current file has been marked as viewed
 - **Change progress**: Current change position (groups consecutive changed lines together)
-- **Stats**: +additions ~modifications -deletions
-- **Comments**: Number of posted PR comments in this file
-- **Pending**: Number of pending comments you've drafted
 - **Mark as viewed**: Press `<CR>` to mark file as viewed and jump to next file
+
+**Middle Float (Stats)**:
+- **Stats**: +additions ~modifications -deletions
+- **Comments**: 💬 Number of posted PR comments in this file
+- **Pending**: 💭 Number of pending comments you've drafted
+
+**Right Float (Keymaps)**:
+- Shows available keyboard shortcuts for review mode
+
+**Toggle Floating Windows**:
+- Press `<C-r>` (default) to hide/show all three floating windows
+- Set `show_floats = false` in config to disable them by default
+- Useful when you want a cleaner view or need more screen space
 
 ### Pending Comments Workflow
 
@@ -357,7 +399,7 @@ To restore a session after restarting Neovim:
 :PRLoadLastSession
 ```
 
-Session files are stored in `~/.local/share/nvim/pr-reviewer-sessions/`.
+Session files are stored in `~/.local/share/nvim/github-pr-reviewer-sessions/`.
 
 ### Inline Diff View
 
@@ -499,7 +541,7 @@ Your LSP is fully functional during PR review:
 Set your preferred picker in the config:
 
 ```lua
-require("pr-reviewer").setup({
+require("github-pr-reviewer").setup({
   picker = "telescope",  -- or "fzf-lua" or "native"
 })
 ```
@@ -517,7 +559,7 @@ Telescope and fzf-lua provide enhanced comment browsing with file previews.
 If you prefer to use gitsigns instead of the built-in inline diff:
 
 ```lua
-require("pr-reviewer").setup({
+require("github-pr-reviewer").setup({
   show_inline_diff = false,  -- Disable built-in diff, use gitsigns instead
 })
 
@@ -622,18 +664,9 @@ MIT
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
-### Development
-
-To work on this plugin:
-
-1. Clone the repository
-2. Make your changes
-3. Test with `:luafile %` in your Neovim config
-4. Submit a PR with a clear description of the changes
-
 ## Credits
 
-Created by [Your Name]
+Created by [Otávio Schwanck]
 
 Inspired by the need for a better PR review experience in Neovim.
 

@@ -1,37 +1,39 @@
 local M = {}
 
-local github = require("pr-reviewer.github")
-local git = require("pr-reviewer.git")
-local ui = require("pr-reviewer.ui")
+local github = require("github-pr-reviewer.github")
+local git = require("github-pr-reviewer.git")
+local ui = require("github-pr-reviewer.ui")
 
 M.config = {
   branch_prefix = "reviewing_",
-  picker = "native", -- "native", "fzf-lua", "telescope"
-  open_files_on_review = false, -- open modified files in quickfix after merge
-  show_comments = true, -- show PR comments in buffers during review
-  show_icons = true, -- show icons in UI elements
-  show_inline_diff = true, -- show inline diff in buffers (old lines as virtual text)
-  debug = false, -- show debug messages
-  mark_as_viewed_key = "<CR>", -- key to mark file as viewed and go to next file
-  next_hunk_key = "<C-j>", -- key to jump to next hunk
-  prev_hunk_key = "<C-k>", -- key to jump to previous hunk
-  next_file_key = "<C-l>", -- key to go to next file in quickfix
-  prev_file_key = "<C-h>", -- key to go to previous file in quickfix
+  picker = "native",              -- "native", "fzf-lua", "telescope"
+  open_files_on_review = false,   -- open modified files in quickfix after merge
+  show_comments = true,           -- show PR comments in buffers during review
+  show_icons = true,              -- show icons in UI elements
+  show_inline_diff = true,        -- show inline diff in buffers (old lines as virtual text)
+  show_floats = true,             -- show floating windows with info, stats and keymaps
+  debug = false,                  -- show debug messages
+  mark_as_viewed_key = "<CR>",    -- key to mark file as viewed and go to next file
+  next_hunk_key = "<C-j>",        -- key to jump to next hunk
+  prev_hunk_key = "<C-k>",        -- key to jump to previous hunk
+  next_file_key = "<C-l>",        -- key to go to next file in quickfix
+  prev_file_key = "<C-h>",        -- key to go to previous file in quickfix
   diff_view_toggle_key = "<C-v>", -- toggle between unified and split diff view
+  toggle_floats_key = "<C-r>",    -- toggle floating windows visibility
 
   -- Review buffer settings
   review_buffer = {
-    position = "left", -- "left", "right", "top", "bottom"
-    width = 50, -- width for left/right
-    height = 20, -- height for top/bottom
-    group_by_directory = true, -- group files by directory
-    sort_by = "path", -- "path", "status", "changes"
-    filter_viewed_key = "fv", -- filter: show only viewed
+    position = "left",            -- "left", "right", "top", "bottom"
+    width = 50,                   -- width for left/right
+    height = 20,                  -- height for top/bottom
+    group_by_directory = true,    -- group files by directory
+    sort_by = "path",             -- "path", "status", "changes"
+    filter_viewed_key = "fv",     -- filter: show only viewed
     filter_not_viewed_key = "fn", -- filter: show only not viewed
-    filter_all_key = "fa", -- filter: show all
-    open_split_key = "s", -- open file in horizontal split
-    open_vsplit_key = "v", -- open file in vertical split
-    toggle_key = "<C-e>", -- toggle review buffer open/close
+    filter_all_key = "fa",        -- filter: show all
+    open_split_key = "s",         -- open file in horizontal split
+    open_vsplit_key = "v",        -- open file in vertical split
+    toggle_key = "<C-e>",         -- toggle review buffer open/close
   },
 }
 
@@ -50,27 +52,28 @@ M._buffer_comments = {}
 M._buffer_changes = {}
 M._buffer_hunks = {}
 M._diff_view_mode = "unified" -- "unified" or "split"
-M._split_view_state = {} -- tracks split view buffers and windows
+M._split_view_state = {}      -- tracks split view buffers and windows
 M._buffer_stats = {}
 M._viewed_files = {}
+M._collapsed_dirs = {}         -- tracks which directories are collapsed in review buffer
 M._local_pending_comments = {} -- Local storage for pending comments (not synced to GitHub yet)
-M._float_win_general = nil -- General info float (file x/total)
-M._float_win_buffer = nil  -- Buffer info float (hunks, stats, comments)
-M._float_win_keymaps = nil -- Keymaps float
-M._buffer_jumped = {} -- Track if we've already jumped to first change in buffer
-M._buffer_keymaps_saved = {} -- Track if we've saved keymaps for this buffer
+M._float_win_general = nil     -- General info float (file x/total)
+M._float_win_buffer = nil      -- Buffer info float (hunks, stats, comments)
+M._float_win_keymaps = nil     -- Keymaps float
+M._buffer_jumped = {}          -- Track if we've already jumped to first change in buffer
+M._buffer_keymaps_saved = {}   -- Track if we've saved keymaps for this buffer
 
 -- Review buffer state
-M._review_buffer = nil -- Review buffer number
-M._review_window = nil -- Review window ID
-M._review_files = {} -- List of files with metadata
+M._review_buffer = nil       -- Review buffer number
+M._review_window = nil       -- Review window ID
+M._review_files = {}         -- List of files with metadata
 M._review_files_ordered = {} -- Ordered list matching ReviewBuffer display order
-M._review_filter = "all" -- Current filter: "all", "viewed", "not_viewed"
-M._review_sort = nil -- Current sort (uses config default)
+M._review_filter = "all"     -- Current filter: "all", "viewed", "not_viewed"
+M._review_sort = nil         -- Current sort (uses config default)
 
 local function get_session_dir()
   local data_path = vim.fn.stdpath("data")
-  return data_path .. "/pr-reviewer-sessions"
+  return data_path .. "/github-pr-reviewer-sessions"
 end
 
 local function get_session_file()
@@ -505,6 +508,11 @@ local function load_inline_diff_for_buffer(bufnr)
     end
   end
 
+  -- Don't show inline diff for new files (entire file would be green)
+  if status == "A" then
+    return
+  end
+
   get_inline_diff(file_path, status, function(hunks)
     if hunks and #hunks > 0 then
       -- Calculate stats
@@ -640,11 +648,11 @@ local function create_split_view(current_bufnr, file_path)
   -- Enable diff mode in both windows
   vim.api.nvim_win_call(left_win, function()
     vim.cmd("diffthis")
-    vim.wo.foldenable = false  -- Disable folding
+    vim.wo.foldenable = false -- Disable folding
   end)
   vim.api.nvim_win_call(right_win, function()
     vim.cmd("diffthis")
-    vim.wo.foldenable = false  -- Disable folding
+    vim.wo.foldenable = false -- Disable folding
   end)
 
   -- Force diff update
@@ -660,7 +668,8 @@ local function create_split_view(current_bufnr, file_path)
     file_path = file_path,
   }
 
-  vim.notify("Split view enabled - Press " .. M.config.diff_view_toggle_key .. " to return to unified view", vim.log.levels.INFO)
+  vim.notify("Split view enabled - Press " .. M.config.diff_view_toggle_key .. " to return to unified view",
+    vim.log.levels.INFO)
 end
 
 local function restore_unified_view(bufnr)
@@ -749,6 +758,25 @@ local function close_float_wins()
   M._float_win_keymaps = nil
 end
 
+-- Toggle floating windows visibility
+function M.toggle_floats()
+  if not vim.g.pr_review_number then
+    return
+  end
+
+  M.config.show_floats = not M.config.show_floats
+
+  if M.config.show_floats then
+    -- Show floats
+    update_changes_float()
+    vim.notify("Floating windows enabled", vim.log.levels.INFO)
+  else
+    -- Hide floats
+    close_float_wins()
+    vim.notify("Floating windows disabled", vim.log.levels.INFO)
+  end
+end
+
 -- Group files by directory
 local function group_files_by_directory(files)
   local grouped = {}
@@ -777,7 +805,7 @@ local function render_review_buffer()
 
   local lines = {}
   local highlights = {}
-  local file_map = {} -- Maps line number to file
+  local file_map = {}          -- Maps line number to file
   M._review_files_ordered = {} -- Reset ordered list
 
   -- Header
@@ -785,8 +813,11 @@ local function render_review_buffer()
   table.insert(lines, "═══ PR Review ═══")
   table.insert(lines, "")
   table.insert(lines, string.format("[%s] Toggle | [q] Close", cfg.toggle_key))
-  table.insert(lines, string.format("Filters: [%s] All  [%s] Viewed  [%s] Not Viewed", cfg.filter_all_key, cfg.filter_viewed_key, cfg.filter_not_viewed_key))
-  table.insert(lines, string.format("Open: [<CR>] Current  [%s] Split  [%s] VSplit", cfg.open_split_key, cfg.open_vsplit_key))
+  table.insert(lines,
+    string.format("Filters: [%s] All  [%s] Viewed  [%s] Not Viewed", cfg.filter_all_key, cfg.filter_viewed_key,
+      cfg.filter_not_viewed_key))
+  table.insert(lines,
+    string.format("Open: [<CR>] Current  [%s] Split  [%s] VSplit", cfg.open_split_key, cfg.open_vsplit_key))
   table.insert(lines, string.format("Sort: %s | Filter: %s", M._review_sort or cfg.sort_by, M._review_filter))
   table.insert(lines, "")
 
@@ -809,52 +840,66 @@ local function render_review_buffer()
     table.sort(dirs)
 
     for _, dir in ipairs(dirs) do
-      table.insert(lines, string.format("📁 %s/", dir))
+      local is_collapsed = M._collapsed_dirs[dir]
+      local icon = is_collapsed and (M.config.show_icons and "▶" or "+") or (M.config.show_icons and "▼" or "-")
+      local dir_line = string.format("%s 📁 %s/", icon, dir)
+      local dir_line_idx = #lines + 1
+      table.insert(lines, dir_line)
       table.insert(highlights, { line = #lines - 1, hl_group = "Directory" })
 
-      for _, file in ipairs(grouped[dir]) do
-        -- Add to ordered list
-        table.insert(M._review_files_ordered, file)
+      -- Store directory reference in file_map so we can toggle it
+      file_map[dir_line_idx] = { is_directory = true, path = dir }
 
-        local filename = file.path:match("[^/]+$")
-        local status_icon = file.status == "M" and "M" or (file.status == "A" and "A" or (file.status == "D" and "D" or "N"))
-        local viewed_icon = file.viewed and (M.config.show_icons and "✓" or "[V]") or (M.config.show_icons and "○" or "[ ]")
-        local stats_str = string.format("+%d ~%d -%d", file.stats.additions, file.stats.modifications, file.stats.deletions)
+      -- Only show files if directory is not collapsed
+      if not is_collapsed then
+        for _, file in ipairs(grouped[dir]) do
+          -- Add to ordered list
+          table.insert(M._review_files_ordered, file)
 
-        -- Add indicator for current file
-        local current_indicator = ""
-        if current_file_path and file.path == current_file_path then
-          current_indicator = M.config.show_icons and " ➤" or " >"
-        end
+          local filename = file.path:match("[^/]+$")
+          local status_icon = file.status == "M" and "M" or
+          (file.status == "A" and "A" or (file.status == "D" and "D" or "N"))
+          local viewed_icon = file.viewed and (M.config.show_icons and "✓" or "[V]") or
+          (M.config.show_icons and "○" or "[ ]")
+          local stats_str = string.format("+%d ~%d -%d", file.stats.additions, file.stats.modifications,
+            file.stats.deletions)
 
-        local line = string.format("  %s %s %s  %s%s", viewed_icon, status_icon, filename, stats_str, current_indicator)
-        local line_idx = #lines + 1
-        table.insert(lines, line)
-        file_map[line_idx] = file
+          -- Add indicator for current file
+          local current_indicator = ""
+          if current_file_path and file.path == current_file_path then
+            current_indicator = M.config.show_icons and " ➤" or " >"
+          end
 
-        -- Calculate filename position in the line for highlighting
-        local filename_start = string.len("  " .. viewed_icon .. " " .. status_icon .. " ")
-        local filename_end = filename_start + string.len(filename)
+          local line = string.format("  %s %s %s  %s%s", viewed_icon, status_icon, filename, stats_str, current_indicator)
+          local line_idx = #lines + 1
+          table.insert(lines, line)
+          file_map[line_idx] = file
 
-        -- Highlight based on status or if current file
-        if current_file_path and file.path == current_file_path then
-          -- Highlight entire line for current file
-          table.insert(highlights, { line = line_idx - 1, hl_group = "CursorLine" })
-          -- Highlight filename with special color
-          table.insert(highlights, { line = line_idx - 1, hl_group = "Search", start_col = filename_start, end_col = filename_end })
-        else
-          -- Apply viewed dimming
-          if file.viewed then
-            table.insert(highlights, { line = line_idx - 1, hl_group = "Comment" })
-          elseif file.status == "A" or file.status == "N" then
-            table.insert(highlights, { line = line_idx - 1, hl_group = "DiffAdd" })
-          elseif file.status == "D" then
-            table.insert(highlights, { line = line_idx - 1, hl_group = "DiffDelete" })
-          elseif file.status == "M" then
-            table.insert(highlights, { line = line_idx - 1, hl_group = "DiffChange" })
+          -- Calculate filename position in the line for highlighting
+          local filename_start = string.len("  " .. viewed_icon .. " " .. status_icon .. " ")
+          local filename_end = filename_start + string.len(filename)
+
+          -- Highlight based on status or if current file
+          if current_file_path and file.path == current_file_path then
+            -- Highlight entire line for current file
+            table.insert(highlights, { line = line_idx - 1, hl_group = "CursorLine" })
+            -- Highlight filename with special color
+            table.insert(highlights,
+              { line = line_idx - 1, hl_group = "Search", start_col = filename_start, end_col = filename_end })
+          else
+            -- Apply viewed dimming
+            if file.viewed then
+              table.insert(highlights, { line = line_idx - 1, hl_group = "Comment" })
+            elseif file.status == "A" or file.status == "N" then
+              table.insert(highlights, { line = line_idx - 1, hl_group = "DiffAdd" })
+            elseif file.status == "D" then
+              table.insert(highlights, { line = line_idx - 1, hl_group = "DiffDelete" })
+            elseif file.status == "M" then
+              table.insert(highlights, { line = line_idx - 1, hl_group = "DiffChange" })
+            end
           end
         end
-      end
+      end -- end of if not is_collapsed
       table.insert(lines, "")
     end
   else
@@ -863,9 +908,12 @@ local function render_review_buffer()
       -- Add to ordered list
       table.insert(M._review_files_ordered, file)
 
-      local status_icon = file.status == "M" and "M" or (file.status == "A" and "A" or (file.status == "D" and "D" or "N"))
-      local viewed_icon = file.viewed and (M.config.show_icons and "✓" or "[V]") or (M.config.show_icons and "○" or "[ ]")
-      local stats_str = string.format("+%d ~%d -%d", file.stats.additions, file.stats.modifications, file.stats.deletions)
+      local status_icon = file.status == "M" and "M" or
+      (file.status == "A" and "A" or (file.status == "D" and "D" or "N"))
+      local viewed_icon = file.viewed and (M.config.show_icons and "✓" or "[V]") or
+      (M.config.show_icons and "○" or "[ ]")
+      local stats_str = string.format("+%d ~%d -%d", file.stats.additions, file.stats.modifications, file.stats
+      .deletions)
 
       -- Add indicator for current file
       local current_indicator = ""
@@ -887,7 +935,8 @@ local function render_review_buffer()
         -- Highlight entire line for current file
         table.insert(highlights, { line = line_idx - 1, hl_group = "CursorLine" })
         -- Highlight filepath with special color
-        table.insert(highlights, { line = line_idx - 1, hl_group = "Search", start_col = filepath_start, end_col = filepath_end })
+        table.insert(highlights,
+          { line = line_idx - 1, hl_group = "Search", start_col = filepath_start, end_col = filepath_end })
       else
         -- Apply viewed dimming
         if file.viewed then
@@ -1034,7 +1083,7 @@ local function open_file_safe(file, split_cmd)
   end
 end
 
--- Open file from review buffer (handles deleted files)
+-- Open file from review buffer (handles deleted files and directory toggling)
 local function open_file_from_review(split_type)
   local bufnr = vim.api.nvim_get_current_buf()
   local file_map = vim.b[bufnr].pr_file_map
@@ -1043,9 +1092,23 @@ local function open_file_from_review(split_type)
   end
 
   local line = vim.api.nvim_win_get_cursor(0)[1]
-  local file = file_map[line]
+  local item = file_map[line]
 
-  if not file or type(file) ~= "table" or not file.path then
+  if not item or type(item) ~= "table" then
+    return
+  end
+
+  -- Check if it's a directory - toggle collapse/expand
+  if item.is_directory then
+    local dir = item.path
+    M._collapsed_dirs[dir] = not M._collapsed_dirs[dir]
+    render_review_buffer()
+    return
+  end
+
+  -- It's a file
+  local file = item
+  if not file.path then
     return
   end
 
@@ -1059,14 +1122,14 @@ local function open_file_from_review(split_type)
   open_file_safe(file, split_type)
 
   -- If was in split mode, recreate split for new file
-  if was_split and not split_type then  -- Only if not opening in split/vsplit
+  if was_split and not split_type then -- Only if not opening in split/vsplit
     vim.defer_fn(function()
       if vim.api.nvim_buf_is_valid(vim.api.nvim_get_current_buf()) then
         local new_bufnr = vim.api.nvim_get_current_buf()
         local file_path = get_relative_path(new_bufnr)
         if file_path then
-          M._diff_view_mode = "unified"  -- Reset to unified first
-          M.toggle_diff_view()  -- Then toggle to split
+          M._diff_view_mode = "unified" -- Reset to unified first
+          M.toggle_diff_view()          -- Then toggle to split
         end
       end
     end, 50)
@@ -1089,7 +1152,8 @@ local function setup_review_buffer_keymaps(bufnr)
   end
 
   -- Open file - using nvim_buf_set_keymap for compatibility
-  vim.api.nvim_buf_set_keymap(bufnr, "n", "<CR>", [[<Cmd>lua _G._pr_reviewer_open_file()<CR>]], { noremap = true, silent = true, nowait = true })
+  vim.api.nvim_buf_set_keymap(bufnr, "n", "<CR>", [[<Cmd>lua _G._pr_reviewer_open_file()<CR>]],
+    { noremap = true, silent = true, nowait = true })
 
   vim.keymap.set("n", cfg.open_split_key, function()
     open_file_from_review("split")
@@ -1099,9 +1163,12 @@ local function setup_review_buffer_keymaps(bufnr)
   end, { buffer = bufnr, silent = true, noremap = true, nowait = true, desc = "Open file in vsplit" })
 
   -- Filters
-  vim.keymap.set("n", cfg.filter_all_key, function() set_review_filter("all") end, { buffer = bufnr, silent = true, noremap = true, nowait = true, desc = "Filter: all files" })
-  vim.keymap.set("n", cfg.filter_viewed_key, function() set_review_filter("viewed") end, { buffer = bufnr, silent = true, noremap = true, nowait = true, desc = "Filter: viewed files" })
-  vim.keymap.set("n", cfg.filter_not_viewed_key, function() set_review_filter("not_viewed") end, { buffer = bufnr, silent = true, noremap = true, nowait = true, desc = "Filter: not viewed files" })
+  vim.keymap.set("n", cfg.filter_all_key, function() set_review_filter("all") end,
+    { buffer = bufnr, silent = true, noremap = true, nowait = true, desc = "Filter: all files" })
+  vim.keymap.set("n", cfg.filter_viewed_key, function() set_review_filter("viewed") end,
+    { buffer = bufnr, silent = true, noremap = true, nowait = true, desc = "Filter: viewed files" })
+  vim.keymap.set("n", cfg.filter_not_viewed_key, function() set_review_filter("not_viewed") end,
+    { buffer = bufnr, silent = true, noremap = true, nowait = true, desc = "Filter: not viewed files" })
 
   -- Note: We DON'T register mark_as_viewed_key here because:
   -- 1. In ReviewBuffer, <CR> should open files, not mark them as viewed
@@ -1211,6 +1278,13 @@ function M.open_review_buffer(callback)
     vim.api.nvim_win_set_option(M._review_window, "signcolumn", "no")
     vim.api.nvim_win_set_option(M._review_window, "wrap", false)
 
+    -- Fix window size (width for left/right, height for top/bottom)
+    if cfg.position == "left" or cfg.position == "right" then
+      vim.api.nvim_win_set_option(M._review_window, "winfixwidth", true)
+    else
+      vim.api.nvim_win_set_option(M._review_window, "winfixheight", true)
+    end
+
     -- Return to previous window
     vim.cmd("wincmd p")
   end
@@ -1274,13 +1348,20 @@ local function setup_global_review_keymaps()
     if vim.g.pr_review_number then
       M.toggle_review_buffer()
     else
-      vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(M.config.review_buffer.toggle_key, true, false, true), "n", false)
+      vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(M.config.review_buffer.toggle_key, true, false, true), "n",
+        false)
     end
   end, { desc = "Toggle review buffer (PR review mode)" })
 end
 
 update_changes_float = function()
   if not vim.g.pr_review_number then
+    close_float_wins()
+    return
+  end
+
+  -- Don't show floats if disabled in config
+  if not M.config.show_floats then
     close_float_wins()
     return
   end
@@ -1361,6 +1442,7 @@ update_changes_float = function()
   table.insert(keymap_lines, string.format(" %s: Prev file ", M.config.prev_file_key))
   table.insert(keymap_lines, string.format(" %s: Mark viewed ", M.config.mark_as_viewed_key))
   table.insert(keymap_lines, string.format(" %s: Toggle split ", M.config.diff_view_toggle_key))
+  table.insert(keymap_lines, string.format(" %s: Toggle floats ", M.config.toggle_floats_key))
 
   -- Helper to create/update float
   local function create_or_update_float(win_var, lines, row_offset, highlight)
@@ -1411,16 +1493,20 @@ update_changes_float = function()
 
   -- Create the 3 floats stacked vertically
   -- Use red border for deleted files
-  local border_hl = file_status == "D" and "Normal:DiagnosticError,FloatBorder:DiagnosticError" or "Normal:DiagnosticInfo,FloatBorder:DiagnosticInfo"
+  local border_hl = file_status == "D" and "Normal:DiagnosticError,FloatBorder:DiagnosticError" or
+  "Normal:DiagnosticInfo,FloatBorder:DiagnosticInfo"
   M._float_win_general = create_or_update_float(M._float_win_general, general_lines, 0, border_hl)
 
   local general_height = #general_lines + 2 -- +2 for border
-  local buffer_hl = file_status == "D" and "Normal:DiagnosticError,FloatBorder:DiagnosticError" or "Normal:DiagnosticHint,FloatBorder:DiagnosticHint"
+  local buffer_hl = file_status == "D" and "Normal:DiagnosticError,FloatBorder:DiagnosticError" or
+  "Normal:DiagnosticHint,FloatBorder:DiagnosticHint"
   M._float_win_buffer = create_or_update_float(M._float_win_buffer, buffer_lines, general_height, buffer_hl)
 
   local buffer_height = #buffer_lines + 2
-  local keymap_hl = file_status == "D" and "Normal:DiagnosticError,FloatBorder:DiagnosticError" or "Normal:DiagnosticWarn,FloatBorder:DiagnosticWarn"
-  M._float_win_keymaps = create_or_update_float(M._float_win_keymaps, keymap_lines, general_height + buffer_height, keymap_hl)
+  local keymap_hl = file_status == "D" and "Normal:DiagnosticError,FloatBorder:DiagnosticError" or
+  "Normal:DiagnosticWarn,FloatBorder:DiagnosticWarn"
+  M._float_win_keymaps = create_or_update_float(M._float_win_keymaps, keymap_lines, general_height + buffer_height,
+    keymap_hl)
 end
 
 function M.mark_file_as_viewed_and_next()
@@ -1564,8 +1650,8 @@ function M.next_file()
         local bufnr = vim.api.nvim_get_current_buf()
         local file_path = get_relative_path(bufnr)
         if file_path then
-          M._diff_view_mode = "unified"  -- Reset to unified first
-          M.toggle_diff_view()  -- Then toggle to split
+          M._diff_view_mode = "unified" -- Reset to unified first
+          M.toggle_diff_view()          -- Then toggle to split
         end
       end
     end, 50)
@@ -1620,8 +1706,8 @@ function M.prev_file()
         local bufnr = vim.api.nvim_get_current_buf()
         local file_path = get_relative_path(bufnr)
         if file_path then
-          M._diff_view_mode = "unified"  -- Reset to unified first
-          M.toggle_diff_view()  -- Then toggle to split
+          M._diff_view_mode = "unified" -- Reset to unified first
+          M.toggle_diff_view()          -- Then toggle to split
         end
       end
     end, 50)
@@ -1746,8 +1832,12 @@ local function load_changes_for_buffer(bufnr)
       if not M._buffer_keymaps_saved[bufnr] then
         vim.keymap.set("n", M.config.next_hunk_key, M.next_hunk, { buffer = bufnr, desc = "Jump to next hunk" })
         vim.keymap.set("n", M.config.prev_hunk_key, M.prev_hunk, { buffer = bufnr, desc = "Jump to previous hunk" })
-        vim.keymap.set("n", M.config.mark_as_viewed_key, M.mark_file_as_viewed_and_next, { buffer = bufnr, desc = "Mark as viewed and next" })
-        vim.keymap.set("n", M.config.diff_view_toggle_key, M.toggle_diff_view, { buffer = bufnr, desc = "Toggle unified/split diff view" })
+        vim.keymap.set("n", M.config.mark_as_viewed_key, M.mark_file_as_viewed_and_next,
+          { buffer = bufnr, desc = "Mark as viewed and next" })
+        vim.keymap.set("n", M.config.diff_view_toggle_key, M.toggle_diff_view,
+          { buffer = bufnr, desc = "Toggle unified/split diff view" })
+        vim.keymap.set("n", M.config.toggle_floats_key, M.toggle_floats,
+          { buffer = bufnr, desc = "Toggle floating windows" })
         M._buffer_keymaps_saved[bufnr] = true
       end
 
@@ -1900,13 +1990,15 @@ function M.load_comments_for_buffer(bufnr, force_reload)
 
     -- Also get pending comments and merge them
     github.get_pending_review_comments(pr_number, function(pending_comments, pending_err)
-      debug_log(string.format("Debug load: Got %d pending comments, err=%s", #(pending_comments or {}), pending_err or "nil"))
+      debug_log(string.format("Debug load: Got %d pending comments, err=%s", #(pending_comments or {}),
+        pending_err or "nil"))
 
       if not pending_err and pending_comments then
         -- Filter pending comments for this file and mark them as pending
         local added_count = 0
         for _, pc in ipairs(pending_comments) do
-          debug_log(string.format("Debug load: Pending comment path=%s, file_path=%s, line=%s", pc.path or "nil", file_path, tostring(pc.line)))
+          debug_log(string.format("Debug load: Pending comment path=%s, file_path=%s, line=%s", pc.path or "nil",
+            file_path, tostring(pc.line)))
           if pc.path == file_path then
             pc.is_pending = true
             pc.body = pc.body .. " (pending)"
@@ -2044,12 +2136,13 @@ local function show_pending_comments_preview(pending_comments, callback)
     col = col,
     style = "minimal",
     border = "rounded",
-    title = string.format(" %d Pending Comment%s - y: proceed | n/q: cancel ", #pending_comments, #pending_comments > 1 and "s" or ""),
+    title = string.format(" %d Pending Comment%s - y: proceed | n/q: cancel ", #pending_comments,
+      #pending_comments > 1 and "s" or ""),
     title_pos = "center",
   })
 
   -- Position cursor at the bottom to show the prompt
-  vim.api.nvim_win_set_cursor(win, {#lines, 0})
+  vim.api.nvim_win_set_cursor(win, { #lines, 0 })
 
   -- Set up keymaps
   local function close_and_respond(proceed)
@@ -2103,7 +2196,8 @@ function M.approve_pr()
               end
             end
 
-            vim.notify(string.format("✅ PR #%d approved with %d comments!", pr_number, #pending_comments), vim.log.levels.INFO)
+            vim.notify(string.format("✅ PR #%d approved with %d comments!", pr_number, #pending_comments),
+              vim.log.levels.INFO)
           else
             vim.notify("❌ Failed to approve: " .. (err or "unknown"), vim.log.levels.ERROR)
           end
@@ -2161,7 +2255,8 @@ function M.request_changes()
               end
             end
 
-            vim.notify(string.format("✅ Requested changes on PR #%d with %d comments", pr_number, #pending_comments), vim.log.levels.INFO)
+            vim.notify(string.format("✅ Requested changes on PR #%d with %d comments", pr_number, #pending_comments),
+              vim.log.levels.INFO)
           else
             vim.notify("❌ Failed to request changes: " .. (err or "unknown"), vim.log.levels.ERROR)
           end
@@ -2221,7 +2316,7 @@ local function build_comment_thread(target_comment, all_comments)
   -- Build the thread from root to current
   local function collect_thread(comment, depth)
     depth = depth or 0
-    table.insert(thread, {comment = comment, depth = depth})
+    table.insert(thread, { comment = comment, depth = depth })
 
     -- Find all replies to this comment
     for _, c in ipairs(all_comments) do
@@ -2242,7 +2337,7 @@ local function wrap_text(text, max_width, indent)
   local available_width = max_width - indent_len
 
   if available_width <= 0 then
-    available_width = 40  -- fallback minimum
+    available_width = 40 -- fallback minimum
   end
 
   local wrapped_lines = {}
@@ -2379,7 +2474,7 @@ local function input_comment_with_context(target_comment, all_comments, prompt_t
   end, { buffer = buf })
 
   -- Position cursor at the answer section
-  vim.api.nvim_win_set_cursor(win, {separator_line + 1, 0})
+  vim.api.nvim_win_set_cursor(win, { separator_line + 1, 0 })
 
   -- Enter insert mode automatically
   vim.cmd("startinsert")
@@ -2515,7 +2610,7 @@ local function input_reply_with_context(target_comment, all_comments, callback)
     table.insert(lines, indent .. prefix .. "**" .. item.comment.user .. "**" .. date .. ":")
 
     -- Add comment body with word wrap and indent
-    local wrapped = wrap_text(item.comment.body, width - 4, indent)  -- -4 for border
+    local wrapped = wrap_text(item.comment.body, width - 4, indent) -- -4 for border
     for _, wrapped_line in ipairs(wrapped) do
       table.insert(lines, wrapped_line)
     end
@@ -2573,7 +2668,7 @@ local function input_reply_with_context(target_comment, all_comments, callback)
   end, { buffer = buf })
 
   -- Position cursor at the answer section
-  vim.api.nvim_win_set_cursor(win, {separator_line + 1, 0})
+  vim.api.nvim_win_set_cursor(win, { separator_line + 1, 0 })
 
   -- Enter insert mode automatically
   vim.cmd("startinsert")
@@ -2606,21 +2701,23 @@ function M.add_review_comment_with_selection()
   M._visual_selection = nil
 
   -- Prompt for comment
-  input_multiline("Suggested change (edit the code above, line " .. temp_selection.start_line .. "-" .. temp_selection.end_line .. ")", function(body)
-    if not body then
-      return
-    end
-
-    vim.notify("Adding code suggestion...", vim.log.levels.INFO)
-    github.add_review_comment(pr_number, file_path, end_line, body, function(ok, err)
-      if ok then
-        vim.notify("✅ Code suggestion added", vim.log.levels.INFO)
-        M.load_comments_for_buffer(bufnr, true)
-      else
-        vim.notify("❌ Failed to add suggestion: " .. (err or "unknown"), vim.log.levels.ERROR)
+  input_multiline(
+  "Suggested change (edit the code above, line " .. temp_selection.start_line .. "-" .. temp_selection.end_line .. ")",
+    function(body)
+      if not body then
+        return
       end
-    end, start_line)
-  end, suggestion_text)
+
+      vim.notify("Adding code suggestion...", vim.log.levels.INFO)
+      github.add_review_comment(pr_number, file_path, end_line, body, function(ok, err)
+        if ok then
+          vim.notify("✅ Code suggestion added", vim.log.levels.INFO)
+          M.load_comments_for_buffer(bufnr, true)
+        else
+          vim.notify("❌ Failed to add suggestion: " .. (err or "unknown"), vim.log.levels.ERROR)
+        end
+      end, start_line)
+    end, suggestion_text)
 end
 
 function M.add_pending_comment_with_selection()
@@ -2649,7 +2746,9 @@ function M.add_pending_comment_with_selection()
   M._visual_selection = nil
 
   -- Prompt for comment
-  input_multiline("Pending suggested change (edit the code above, line " .. temp_selection.start_line .. "-" .. temp_selection.end_line .. ")", function(body)
+  input_multiline(
+  "Pending suggested change (edit the code above, line " ..
+  temp_selection.start_line .. "-" .. temp_selection.end_line .. ")", function(body)
     if not body then
       return
     end
@@ -2892,9 +2991,9 @@ function M.list_all_comments()
     local is_duplicate = false
     for _, posted in ipairs(all_comments) do
       if posted.path == pending.path and
-         posted.line == pending.line and
-         posted.body == pending.body and
-         not posted.is_local then
+          posted.line == pending.line and
+          posted.body == pending.body and
+          not posted.is_local then
         is_duplicate = true
         break
       end
@@ -3089,8 +3188,8 @@ function M.edit_my_comment()
 
         -- Set title based on comment type
         local title = comment.is_local
-          and " Edit PENDING comment (save: <C-s>, cancel: <Esc>) "
-          or " Edit comment (save: <C-s>, cancel: <Esc>) "
+            and " Edit PENDING comment (save: <C-s>, cancel: <Esc>) "
+            or " Edit comment (save: <C-s>, cancel: <Esc>) "
 
         local win = vim.api.nvim_open_win(buf, true, {
           relative = "editor",
@@ -3554,7 +3653,7 @@ function M.show_pr_info()
         vim.api.nvim_win_close(win, true)
       end, { buffer = buf })
     end) -- End of get_pr_checks callback
-  end) -- End of get_pr_info callback
+  end)   -- End of get_pr_info callback
 end
 
 function M.open_pr()
@@ -3583,7 +3682,8 @@ local function check_and_cleanup_if_needed(callback)
     vim.ui.select(
       { "Yes, cleanup first", "No, continue without cleanup" },
       {
-        prompt = "You are already reviewing PR #" .. vim.g.pr_review_number .. ". Do you want to cleanup the current review before starting a new one?",
+        prompt = "You are already reviewing PR #" ..
+        vim.g.pr_review_number .. ". Do you want to cleanup the current review before starting a new one?",
       },
       function(choice)
         if not choice then
@@ -3610,7 +3710,8 @@ end
 
 function M.list_review_requests()
   if git.has_uncommitted_changes() then
-    vim.notify("Cannot start review: you have uncommitted changes. Please commit or stash them first.", vim.log.levels.ERROR)
+    vim.notify("Cannot start review: you have uncommitted changes. Please commit or stash them first.",
+      vim.log.levels.ERROR)
     return
   end
 
@@ -3660,7 +3761,7 @@ function M._start_review_for_pr(pr)
   -- Check if already in review mode for a different PR
   if vim.g.pr_review_number and vim.g.pr_review_number ~= pr.number then
     vim.notify(string.format("Cleaning up current review (PR #%d) to start PR #%d...",
-                             vim.g.pr_review_number, pr.number), vim.log.levels.INFO)
+      vim.g.pr_review_number, pr.number), vim.log.levels.INFO)
     M.cleanup_review_branch()
     -- Wait a bit for cleanup to complete
     vim.defer_fn(function()
@@ -3722,9 +3823,9 @@ function M._do_start_review(pr)
       end
 
       debug_log(string.format("Debug: About to merge - branch=%s, owner=%s, url=%s",
-                               pr.head_branch or "nil",
-                               pr.head_repo_owner or "nil",
-                               pr.head_repo_url or "nil"))
+        pr.head_branch or "nil",
+        pr.head_repo_owner or "nil",
+        pr.head_repo_url or "nil"))
       git.soft_merge(pr.head_branch, pr.head_repo_owner, pr.head_repo_url, function(merge_ok, merge_err, has_conflicts)
         if not merge_ok then
           vim.notify("Error during soft merge: " .. (merge_err or "unknown"), vim.log.levels.ERROR)
@@ -3988,7 +4089,8 @@ end
 
 function M.review_pr()
   if git.has_uncommitted_changes() then
-    vim.notify("Cannot start review: you have uncommitted changes. Please commit or stash them first.", vim.log.levels.ERROR)
+    vim.notify("Cannot start review: you have uncommitted changes. Please commit or stash them first.",
+      vim.log.levels.ERROR)
     return
   end
 
@@ -4063,9 +4165,9 @@ function M._do_review_pr_with_branch(pr)
       end
 
       debug_log(string.format("Debug: About to merge - branch=%s, owner=%s, url=%s",
-                               pr.head_branch or "nil",
-                               pr.head_repo_owner or "nil",
-                               pr.head_repo_url or "nil"))
+        pr.head_branch or "nil",
+        pr.head_repo_owner or "nil",
+        pr.head_repo_url or "nil"))
       git.soft_merge(pr.head_branch, pr.head_repo_owner, pr.head_repo_url, function(merge_ok, merge_err, has_conflicts)
         if not merge_ok then
           vim.notify("Error during soft merge: " .. (merge_err or "unknown"), vim.log.levels.ERROR)
@@ -4164,6 +4266,7 @@ function M.cleanup_review_branch()
           pcall(vim.keymap.del, "n", M.config.prev_hunk_key, { buffer = buf })
           pcall(vim.keymap.del, "n", M.config.mark_as_viewed_key, { buffer = buf })
           pcall(vim.keymap.del, "n", M.config.diff_view_toggle_key, { buffer = buf })
+          pcall(vim.keymap.del, "n", M.config.toggle_floats_key, { buffer = buf })
         end
       end
 
@@ -4320,36 +4423,49 @@ function M.show_review_menu()
   if not in_review_mode then
     -- Not in review mode - show PR selection options
     sections = {
-      { title = "Pull Request", items = {
-        { key = "l", desc = "List Pull Requests", cmd = function() M.review_pr() end },
-        { key = "r", desc = "List Pull Requests with Assignee", cmd = function() M.list_review_requests() end },
-      }},
+      {
+        title = "Pull Request",
+        items = {
+          { key = "l", desc = "List Pull Requests",               cmd = function() M.review_pr() end },
+          { key = "r", desc = "List Pull Requests with Assignee", cmd = function() M.list_review_requests() end },
+        }
+      },
     }
 
     if has_session then
-      table.insert(sections[1].items, { key = "s", desc = "Load Last Session", cmd = function() M.load_last_session() end })
+      table.insert(sections[1].items,
+        { key = "s", desc = "Load Last Session", cmd = function() M.load_last_session() end })
     end
   else
     -- In review mode - show review actions
     sections = {
-      { title = "Pull Request", items = {
-        { key = "i", desc = "PR Info", cmd = function() M.show_pr_info() end },
-        { key = "o", desc = "Open PR in Browser", cmd = function() M.open_pr() end },
-        { key = "c", desc = "Comment on PR", cmd = function() M.add_comment() end },
-        { key = "a", desc = "Approve PR", cmd = function() M.approve_pr() end },
-        { key = "x", desc = "Request Changes", cmd = function() M.request_changes() end },
-        { key = "e", desc = "Cleanup Review", cmd = function() M.cleanup_review_branch() end },
-      }},
-      { title = "General", items = {
-        { key = "b", desc = "Toggle Review Buffer", cmd = function() M.toggle_review_buffer() end },
-      }},
-      { title = "Comments", items = {
-        { key = "l", desc = "Add Line Comment", cmd = function() M.add_review_comment() end },
-        { key = "p", desc = "Add Pending Comment", cmd = function() M.add_pending_comment() end },
-        { key = "v", desc = "List All Comments", cmd = function() M.list_all_comments() end },
-        { key = "r", desc = "Reply to Comment", cmd = function() M.reply_to_comment() end },
-        { key = "d", desc = "Delete Comment", cmd = function() M.delete_my_comment() end },
-      }},
+      {
+        title = "Pull Request",
+        items = {
+          { key = "i", desc = "PR Info",            cmd = function() M.show_pr_info() end },
+          { key = "o", desc = "Open PR in Browser", cmd = function() M.open_pr() end },
+          { key = "c", desc = "Comment on PR",      cmd = function() M.add_comment() end },
+          { key = "a", desc = "Approve PR",         cmd = function() M.approve_pr() end },
+          { key = "x", desc = "Request Changes",    cmd = function() M.request_changes() end },
+          { key = "e", desc = "Cleanup Review",     cmd = function() M.cleanup_review_branch() end },
+        }
+      },
+      {
+        title = "General",
+        items = {
+          { key = "b", desc = "Toggle Review Buffer", cmd = function() M.toggle_review_buffer() end },
+        }
+      },
+      {
+        title = "Comments",
+        items = {
+          { key = "l", desc = "Add Line Comment",    cmd = function() M.add_review_comment() end },
+          { key = "p", desc = "Add Pending Comment", cmd = function() M.add_pending_comment() end },
+          { key = "v", desc = "List All Comments",   cmd = function() M.list_all_comments() end },
+          { key = "r", desc = "Reply to Comment",    cmd = function() M.reply_to_comment() end },
+          { key = "d", desc = "Delete Comment",      cmd = function() M.delete_my_comment() end },
+        }
+      },
     }
   end
 

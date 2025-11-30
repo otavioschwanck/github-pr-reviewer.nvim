@@ -5,7 +5,7 @@ M._viewed_prs = {}
 
 -- Debug logging helper
 local function debug_log(msg)
-  local pr_reviewer = require("pr-reviewer")
+  local pr_reviewer = require("github-pr-reviewer")
   if pr_reviewer.config.debug then
     vim.notify(msg, vim.log.levels.INFO)
   end

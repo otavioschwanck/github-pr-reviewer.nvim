@@ -62,6 +62,7 @@ M._float_win_buffer = nil      -- Buffer info float (hunks, stats, comments)
 M._float_win_keymaps = nil     -- Keymaps float
 M._buffer_jumped = {}          -- Track if we've already jumped to first change in buffer
 M._buffer_keymaps_saved = {}   -- Track if we've saved keymaps for this buffer
+M._opening_file = false        -- Prevent concurrent file opening operations
 
 -- Review buffer state
 M._review_buffer = nil       -- Review buffer number
@@ -619,8 +620,14 @@ local function create_split_view(current_bufnr, file_path)
   vim.bo[base_buf].buftype = "nofile"
   vim.bo[base_buf].modifiable = false
 
-  -- Set buffer name
-  vim.api.nvim_buf_set_name(base_buf, string.format("[BEFORE] %s", file_path))
+  -- Set buffer name - delete any existing buffer with this name first
+  local buf_name = string.format("[BEFORE] %s", file_path)
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) == buf_name then
+      pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    end
+  end
+  vim.api.nvim_buf_set_name(base_buf, buf_name)
 
   -- Create vertical split to the left
   vim.cmd("leftabove vsplit")
@@ -638,10 +645,8 @@ local function create_split_view(current_bufnr, file_path)
     vim.api.nvim_win_set_buf(right_win, current_bufnr)
   end
 
-  -- Reload the file to ensure we have the latest version
-  vim.api.nvim_buf_call(current_bufnr, function()
-    vim.cmd("edit!")
-  end)
+  -- Don't reload the file - it already has the PR changes (unstaged modifications)
+  -- Reloading with edit! would reset it to the committed version
 
   -- Clear inline diff from the current buffer (we don't need it in split view)
   vim.api.nvim_buf_clear_namespace(current_bufnr, diff_ns_id, 0, -1)
@@ -690,8 +695,12 @@ local function restore_unified_view()
   end
 
   -- Close left window (base version)
+  -- Only close if it's not the last window
   if vim.api.nvim_win_is_valid(state.left_win) then
-    vim.api.nvim_win_close(state.left_win, true)
+    local win_count = #vim.api.nvim_list_wins()
+    if win_count > 1 then
+      pcall(vim.api.nvim_win_close, state.left_win, true)
+    end
   end
 
   -- Delete base buffer
@@ -1073,6 +1082,11 @@ end
 
 -- Open file from review buffer (handles deleted files and directory toggling)
 local function open_file_from_review(split_type)
+  -- Prevent concurrent file opening operations
+  if M._opening_file then
+    return
+  end
+
   local bufnr = vim.api.nvim_get_current_buf()
   local file_map = vim.b[bufnr].pr_file_map
   if not file_map or type(file_map) ~= "table" then
@@ -1100,6 +1114,8 @@ local function open_file_from_review(split_type)
     return
   end
 
+  M._opening_file = true
+
   -- If in split mode, restore unified before opening new file
   local was_split = M._diff_view_mode == "split"
   if was_split then
@@ -1120,7 +1136,10 @@ local function open_file_from_review(split_type)
           M.toggle_diff_view()          -- Then toggle to split
         end
       end
+      M._opening_file = false
     end, 50)
+  else
+    M._opening_file = false
   end
 end
 
@@ -1599,6 +1618,11 @@ function M.prev_hunk()
 end
 
 function M.next_file()
+  -- Prevent concurrent file navigation operations
+  if M._opening_file then
+    return
+  end
+
   -- Use ordered list from ReviewBuffer
   local file_list = #M._review_files_ordered > 0 and M._review_files_ordered or M._review_files
 
@@ -1629,6 +1653,7 @@ function M.next_file()
     return
   end
 
+  M._opening_file = true
   local next_file = file_list[current_idx + 1]
 
   -- If in split mode, restore unified before opening next file
@@ -1650,11 +1675,19 @@ function M.next_file()
           M.toggle_diff_view()          -- Then toggle to split
         end
       end
+      M._opening_file = false
     end, 50)
+  else
+    M._opening_file = false
   end
 end
 
 function M.prev_file()
+  -- Prevent concurrent file navigation operations
+  if M._opening_file then
+    return
+  end
+
   -- Use ordered list from ReviewBuffer
   local file_list = #M._review_files_ordered > 0 and M._review_files_ordered or M._review_files
 
@@ -1685,6 +1718,7 @@ function M.prev_file()
     return
   end
 
+  M._opening_file = true
   local prev_file = file_list[current_idx - 1]
 
   -- If in split mode, restore unified before opening prev file
@@ -1706,7 +1740,10 @@ function M.prev_file()
           M.toggle_diff_view()          -- Then toggle to split
         end
       end
+      M._opening_file = false
     end, 50)
+  else
+    M._opening_file = false
   end
 end
 
@@ -1770,22 +1807,34 @@ local function update_hunk_navigation_hints()
   if hint_text ~= "" then
     local line_idx = cursor_line - 1
     if line_idx >= 0 and line_idx < vim.api.nvim_buf_line_count(bufnr) then
-      -- Determine highlight based on whether this line is a change
-      local highlight = "Comment" -- default neutral color
+      -- Check if current line is a changed line to match background color
+      local is_changed_line = false
       local changes = M._buffer_changes[bufnr]
       if changes then
         for _, change_line in ipairs(changes) do
           if change_line == cursor_line then
-            highlight = "DiffAdd" -- green for added lines
+            is_changed_line = true
             break
           end
         end
       end
 
-      vim.api.nvim_buf_set_extmark(bufnr, hunk_hints_ns_id, line_idx, 0, {
-        virt_text = { { hint_text, highlight } },
-        virt_text_pos = "eol",
-      })
+      -- Create custom highlight groups for hints with dimmed text
+      if is_changed_line then
+        -- Hint on diff line: green background, dimmed gray text
+        vim.api.nvim_set_hl(0, "PRHintOnDiff", { fg = "#6c7086", bg = "#40a02b" })
+        vim.api.nvim_buf_set_extmark(bufnr, hunk_hints_ns_id, line_idx, 0, {
+          virt_text = { { hint_text, "PRHintOnDiff" } },
+          virt_text_pos = "eol",
+        })
+      else
+        -- Hint on normal line: normal background, dimmed gray text
+        vim.api.nvim_set_hl(0, "PRHint", { fg = "#6c7086", bg = "NONE" })
+        vim.api.nvim_buf_set_extmark(bufnr, hunk_hints_ns_id, line_idx, 0, {
+          virt_text = { { hint_text, "PRHint" } },
+          virt_text_pos = "eol",
+        })
+      end
     end
   end
 end
@@ -1814,13 +1863,18 @@ local function load_changes_for_buffer(bufnr)
       M._buffer_hunks[bufnr] = hunks
 
       vim.api.nvim_buf_clear_namespace(bufnr, changes_ns_id, 0, -1)
-      for _, line in ipairs(lines) do
-        local line_idx = line - 1
-        if line_idx >= 0 and line_idx < vim.api.nvim_buf_line_count(bufnr) then
-          vim.api.nvim_buf_set_extmark(bufnr, changes_ns_id, line_idx, 0, {
-            sign_text = "│",
-            sign_hl_group = "DiffAdd",
-          })
+
+      -- Don't show change indicators for completely new files (status "A")
+      -- Since everything is new, showing all lines as changed is not helpful
+      if status ~= "A" then
+        for _, line in ipairs(lines) do
+          local line_idx = line - 1
+          if line_idx >= 0 and line_idx < vim.api.nvim_buf_line_count(bufnr) then
+            vim.api.nvim_buf_set_extmark(bufnr, changes_ns_id, line_idx, 0, {
+              sign_text = "│",
+              sign_hl_group = "DiffAdd",
+            })
+          end
         end
       end
 
@@ -2229,9 +2283,9 @@ function M.request_changes()
       return
     end
 
-    input_multiline("Reason for requesting changes", function(body)
-      if not body then
-        vim.notify("Reason is required", vim.log.levels.WARN)
+    input_multiline("Reason for requesting changes (required by GitHub)", function(body)
+      if not body or body:match("^%s*$") then
+        vim.notify("❌ Reason is required when requesting changes (GitHub requirement)", vim.log.levels.ERROR)
         return
       end
       vim.notify("Requesting changes on PR #" .. pr_number .. "...", vim.log.levels.INFO)
@@ -3146,8 +3200,47 @@ function M.list_global_comments()
 
       vim.keymap.set("n", "r", function()
         close_window()
-        -- Reply to the comment
-        vim.ui.input({ prompt = "Reply: " }, function(reply_text)
+        -- Build conversation context to show while replying
+        local context_lines = {
+          string.format("# Replying to comment by %s (%s)", comment.user, comment.created_at:sub(1, 10)),
+          "",
+          "## Original Comment:",
+          ""
+        }
+
+        -- Add the original comment body with quote markers
+        for _, line in ipairs(vim.split(comment.body, "\n")) do
+          table.insert(context_lines, "> " .. line)
+        end
+
+        table.insert(context_lines, "")
+        table.insert(context_lines, "## Your Reply:")
+        table.insert(context_lines, "")
+        table.insert(context_lines, "")
+
+        local initial_text = table.concat(context_lines, "\n")
+
+        -- Reply to the comment using multiline input with context
+        input_multiline("Reply to global comment", function(full_text)
+          if not full_text or full_text == "" then
+            return
+          end
+
+          -- Extract only the reply part (everything after "## Your Reply:")
+          local reply_start = full_text:find("## Your Reply:")
+          if not reply_start then
+            -- Fallback: use the entire text if marker not found
+            reply_text = full_text
+          else
+            -- Find the end of the "## Your Reply:" line
+            local reply_line_end = full_text:find("\n", reply_start)
+            if reply_line_end then
+              reply_text = full_text:sub(reply_line_end + 1):match("^%s*(.-)%s*$") -- trim whitespace
+            else
+              reply_text = ""
+            end
+          end
+
           if reply_text and reply_text ~= "" then
             github.add_pr_comment(pr_number, reply_text, function(ok, add_err)
               if ok then
@@ -3157,7 +3250,7 @@ function M.list_global_comments()
               end
             end)
           end
-        end)
+        end, initial_text)
       end, { buffer = buf })
 
       -- Auto-close if user leaves the buffer (e.g., switches windows)
@@ -4495,6 +4588,27 @@ local function show_menu_window(sections)
   vim.wo[win_id].relativenumber = false
   vim.wo[win_id].signcolumn = "no"
 
+  -- Hide cursor by making it invisible with winhighlight
+  vim.api.nvim_set_hl(0, "MenuCursorHidden", { blend = 100 })
+  vim.wo[win_id].winhighlight = "Cursor:MenuCursorHidden,lCursor:MenuCursorHidden,TermCursor:MenuCursorHidden,TermCursorNC:MenuCursorHidden"
+
+  -- Also hide cursor with guicursor when entering this window
+  local saved_guicursor = vim.o.guicursor
+  vim.api.nvim_create_autocmd("WinEnter", {
+    callback = function()
+      if vim.api.nvim_get_current_win() == win_id then
+        vim.o.guicursor = "a:ver1"  -- 1-pixel vertical cursor (almost invisible)
+      end
+    end,
+  })
+  vim.api.nvim_create_autocmd("WinLeave", {
+    callback = function()
+      if vim.api.nvim_get_current_win() == win_id then
+        vim.o.guicursor = saved_guicursor
+      end
+    end,
+  })
+
   -- Setup keymaps for the menu buffer
   local function close_menu()
     if vim.api.nvim_win_is_valid(win_id) then
@@ -4578,6 +4692,7 @@ function M.show_review_menu()
           { key = "v", desc = "List All Comments",   cmd = function() M.list_all_comments() end },
           { key = "g", desc = "Global PR Comments",  cmd = function() M.list_global_comments() end },
           { key = "r", desc = "Reply to Comment",    cmd = function() M.reply_to_comment() end },
+          { key = "m", desc = "Edit My Comment",     cmd = function() M.edit_my_comment() end },
           { key = "d", desc = "Delete Comment",      cmd = function() M.delete_my_comment() end },
         }
       },

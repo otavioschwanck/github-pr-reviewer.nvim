@@ -4728,7 +4728,7 @@ function M.show_review_menu()
           { key = "c", desc = "Comment on PR",      cmd = function() M.add_comment() end },
           { key = "a", desc = "Approve PR",         cmd = function() M.approve_pr() end },
           { key = "x", desc = "Request Changes",    cmd = function() M.request_changes() end },
-          { key = "e", desc = "Cleanup Review",     cmd = function() M.cleanup_review_branch() end },
+          { key = "e", desc = "Exit Review",        cmd = function() M.cleanup_review_branch() end },
         }
       },
       {
@@ -4738,16 +4738,21 @@ function M.show_review_menu()
         }
       },
       {
+        title = "Line Comment",
+        items = {
+          { key = "l", desc = "Add Line Comment",    cmd = function() M.add_review_comment() end },
+          { key = "p", desc = "Add Pending Comment", cmd = function() M.add_pending_comment() end },
+          { key = "r", desc = "Reply to Comment",    cmd = function() M.reply_to_comment() end },
+          { key = "m", desc = "Edit My Comment",     cmd = function() M.edit_my_comment() end },
+          { key = "d", desc = "Delete Comment",      cmd = function() M.delete_my_comment() end },
+        }
+      },
+      {
         title = "Comments",
         items = {
-          { key = "l", desc = "Add Line Comment",       cmd = function() M.add_review_comment() end },
-          { key = "p", desc = "Add Pending Comment",    cmd = function() M.add_pending_comment() end },
           { key = "s", desc = "Submit Pending Comments", cmd = function() M.submit_pending_comments() end },
-          { key = "v", desc = "List All Comments",      cmd = function() M.list_all_comments() end },
-          { key = "g", desc = "Global PR Comments",     cmd = function() M.list_global_comments() end },
-          { key = "r", desc = "Reply to Comment",       cmd = function() M.reply_to_comment() end },
-          { key = "m", desc = "Edit My Comment",        cmd = function() M.edit_my_comment() end },
-          { key = "d", desc = "Delete Comment",         cmd = function() M.delete_my_comment() end },
+          { key = "v", desc = "List All Comments",       cmd = function() M.list_all_comments() end },
+          { key = "g", desc = "Global PR Comments",      cmd = function() M.list_global_comments() end },
         }
       },
     }

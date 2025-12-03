@@ -207,7 +207,7 @@ Configure the plugin by calling the setup function: >lua
       -- Picker: "native", "fzf-lua", or "telescope"
       picker = "native",
 
-      -- Open modified files in quickfix after starting review
+      -- Open modified files after starting review
       open_files_on_review = true,
 
       -- Show PR comments as virtual text in buffers
@@ -237,10 +237,10 @@ Configure the plugin by calling the setup function: >lua
       -- Key to jump to previous hunk
       prev_hunk_key = "<C-k>",
 
-      -- Key to go to next file in quickfix
+      -- Key to go to next modified file
       next_file_key = "<C-l>",
 
-      -- Key to go to previous file in quickfix
+      -- Key to go to previous modified file
       prev_file_key = "<C-h>",
     })
 <
@@ -258,8 +258,7 @@ picker                  (string, default: "native")
 
                                                      *github-pr-reviewer.open_files_on_review*
 open_files_on_review    (boolean, default: true)
-                        Open modified files in quickfix list after
-                        starting a review.
+                        Open modified files after starting a review.
 
                                                      *github-pr-reviewer.show_comments*
 show_comments           (boolean, default: true)
@@ -308,13 +307,13 @@ prev_hunk_key           (string, default: "<C-k>")
 
                                                      *github-pr-reviewer.next_file_key*
 next_file_key           (string, default: "<C-l>")
-                        Key to go to next file in quickfix. Only works
-                        in review mode.
+                        Key to go to next modified file. Only works in
+                        review mode.
 
                                                      *github-pr-reviewer.prev_file_key*
 prev_file_key           (string, default: "<C-h>")
-                        Key to go to previous file in quickfix. Only
-                        works in review mode.
+                        Key to go to previous modified file. Only works
+                        in review mode.
 
 ==============================================================================
 7. WORKFLOWS                                       *github-pr-reviewer-workflows*
@@ -375,17 +374,13 @@ Hunk Navigation (within a file):
 • <C-k> (default) - Jump to previous hunk
 
 File Navigation (between modified files):
-• <C-l> (default) - Go to next file in quickfix
-• <C-h> (default) - Go to previous file in quickfix
+• <C-l> (default) - Go to next modified file
+• <C-h> (default) - Go to previous modified file
 • <CR> (default) - Mark file as viewed and jump to next file
 
 View Controls:
 • <C-v> (default) - Toggle between unified and split diff view
 • <C-r> (default) - Toggle floating windows visibility
-
-Quickfix List:
-• :cnext or ]q - Go to next modified file
-• :cprev or [q - Go to previous modified file
 
 All keybindings are configurable and only activate during PR review mode.
 
@@ -523,8 +518,8 @@ mode (they won't interfere with normal usage):
 • <CR> (configurable) - Mark file as viewed and jump to next file
 • <C-j> (configurable) - Jump to next hunk
 • <C-k> (configurable) - Jump to previous hunk
-• <C-l> (configurable) - Go to next file in quickfix
-• <C-h> (configurable) - Go to previous file in quickfix
+• <C-l> (configurable) - Go to next modified file
+• <C-h> (configurable) - Go to previous modified file
 • <C-v> (configurable) - Toggle between unified and split diff view
 • <C-r> (configurable) - Toggle floating windows visibility
 

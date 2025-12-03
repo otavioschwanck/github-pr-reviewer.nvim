@@ -7,7 +7,7 @@ local ui = require("github-pr-reviewer.ui")
 M.config = {
   branch_prefix = "reviewing_",
   picker = "native",              -- "native", "fzf-lua", "telescope"
-  open_files_on_review = false,   -- open modified files in quickfix after merge
+  open_files_on_review = false,   -- open modified files after starting review
   show_comments = true,           -- show PR comments in buffers during review
   show_icons = true,              -- show icons in UI elements
   show_inline_diff = true,        -- show inline diff in buffers (old lines as virtual text)
@@ -16,8 +16,8 @@ M.config = {
   mark_as_viewed_key = "<CR>",    -- key to mark file as viewed and go to next file
   next_hunk_key = "<C-j>",        -- key to jump to next hunk
   prev_hunk_key = "<C-k>",        -- key to jump to previous hunk
-  next_file_key = "<C-l>",        -- key to go to next file in quickfix
-  prev_file_key = "<C-h>",        -- key to go to previous file in quickfix
+  next_file_key = "<C-l>",        -- key to go to next modified file
+  prev_file_key = "<C-h>",        -- key to go to previous modified file
   diff_view_toggle_key = "<C-v>", -- toggle between unified and split diff view
   toggle_floats_key = "<C-r>",    -- toggle floating windows visibility
 
@@ -3106,121 +3106,126 @@ function M.list_all_comments()
     return
   end
 
-  -- Collect all comments from all buffers (GitHub posted comments)
-  local all_comments = {}
+  -- Fetch ALL comments from GitHub API (not just cached ones)
+  github.fetch_pr_comments(pr_number, function(github_comments, err)
+    if err then
+      vim.notify("Failed to fetch PR comments: " .. err, vim.log.levels.ERROR)
+      return
+    end
 
-  -- Add GitHub comments from buffer cache
-  for bufnr, comments in pairs(M._buffer_comments) do
-    if vim.api.nvim_buf_is_valid(bufnr) then
-      local file_path = vim.api.nvim_buf_get_name(bufnr)
-      -- Make path relative to cwd
-      local cwd = vim.fn.getcwd()
-      if file_path:sub(1, #cwd) == cwd then
-        file_path = file_path:sub(#cwd + 2)
-      end
+    local all_comments = {}
 
-      for _, comment in ipairs(comments) do
+    -- Add all GitHub comments
+    for _, comment in ipairs(github_comments or {}) do
+      -- Skip comments without line number (those are review-level comments)
+      if comment.line then
         table.insert(all_comments, {
           id = comment.id,
-          path = file_path,
+          path = comment.path,
           line = comment.line,
           user = comment.user,
           body = comment.body,
           created_at = comment.created_at,
           is_local = false,
-          bufnr = bufnr,
+          bufnr = nil,
         })
       end
     end
-  end
 
-  -- Add local pending comments (but check for duplicates)
-  local pending_comments = get_local_pending_comments_for_pr(pr_number)
-  for _, pending in ipairs(pending_comments) do
-    -- Check if this comment already exists in GitHub comments
-    local is_duplicate = false
-    for _, posted in ipairs(all_comments) do
-      if posted.path == pending.path and
-          posted.line == pending.line and
-          posted.body == pending.body and
-          not posted.is_local then
-        is_duplicate = true
-        break
-      end
-    end
-
-    -- Only add if not a duplicate
-    if not is_duplicate then
-      table.insert(all_comments, {
-        id = pending.id,
-        path = pending.path,
-        line = pending.line,
-        user = "You (PENDING)",
-        body = pending.body,
-        created_at = pending.created_at,
-        is_local = true,
-        bufnr = nil,
-      })
-    end
-  end
-
-  if #all_comments == 0 then
-    vim.notify("No comments in this PR", vim.log.levels.INFO)
-    return
-  end
-
-  -- Sort by file path, then line number
-  table.sort(all_comments, function(a, b)
-    if a.path ~= b.path then
-      return a.path < b.path
-    end
-    return a.line < b.line
-  end)
-
-  -- Use the UI picker to select a comment
-  ui.select_all_comments(all_comments, M.config.picker, function(selected_comment)
-    if not selected_comment then
-      return
-    end
-
-    -- Navigate to the file and line
-    local file_path = selected_comment.path
-
-    -- Try to find buffer with this file
-    local found_buf = selected_comment.bufnr
-    if not found_buf or not vim.api.nvim_buf_is_valid(found_buf) then
-      for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-        if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf):match(file_path .. "$") then
-          found_buf = buf
+    -- Add local pending comments (but check for duplicates)
+    local pending_comments = get_local_pending_comments_for_pr(pr_number)
+    for _, pending in ipairs(pending_comments) do
+      -- Check if this comment already exists in GitHub comments
+      local is_duplicate = false
+      for _, posted in ipairs(all_comments) do
+        if posted.path == pending.path and
+            posted.line == pending.line and
+            posted.body == pending.body and
+            not posted.is_local then
+          is_duplicate = true
           break
         end
       end
-    end
 
-    -- Open the file
-    if found_buf then
-      -- File is already open in a buffer, find or create a window for it
-      local wins = vim.fn.win_findbuf(found_buf)
-      if #wins > 0 then
-        vim.api.nvim_set_current_win(wins[1])
-      else
-        vim.cmd("buffer " .. found_buf)
+      -- Only add if not a duplicate
+      if not is_duplicate then
+        table.insert(all_comments, {
+          id = pending.id,
+          path = pending.path,
+          line = pending.line,
+          user = "You (PENDING)",
+          body = pending.body,
+          created_at = pending.created_at,
+          is_local = true,
+          bufnr = nil,
+        })
       end
-    else
-      -- Open the file
-      vim.cmd("edit " .. file_path)
     end
 
-    -- Navigate to the line
-    vim.api.nvim_win_set_cursor(0, { selected_comment.line, 0 })
-    vim.cmd("normal! zz")
+    if #all_comments == 0 then
+      vim.notify("No comments in this PR", vim.log.levels.INFO)
+      return
+    end
 
-    -- Show notification with comment info
-    local status = selected_comment.is_local and "PENDING" or "Posted"
-    vim.notify(
-      string.format("[%s] %s:%d - %s", status, file_path, selected_comment.line, selected_comment.user),
-      vim.log.levels.INFO
-    )
+    -- Sort by file path, then line number
+    table.sort(all_comments, function(a, b)
+      if a.path ~= b.path then
+        return a.path < b.path
+      end
+      return a.line < b.line
+    end)
+
+    -- Use the UI picker to select a comment
+    ui.select_all_comments(all_comments, M.config.picker, function(selected_comment)
+      if not selected_comment then
+        return
+      end
+
+      -- Navigate to the file and line
+      local file_path = selected_comment.path
+
+      -- Try to find buffer with this file
+      local found_buf = nil
+      for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+        if vim.api.nvim_buf_is_valid(buf) then
+          local buf_name = vim.api.nvim_buf_get_name(buf)
+          -- Make path relative to cwd
+          local cwd = vim.fn.getcwd()
+          if buf_name:sub(1, #cwd) == cwd then
+            buf_name = buf_name:sub(#cwd + 2)
+          end
+          if buf_name == file_path then
+            found_buf = buf
+            break
+          end
+        end
+      end
+
+      -- Open the file
+      if found_buf then
+        -- File is already open in a buffer, find or create a window for it
+        local wins = vim.fn.win_findbuf(found_buf)
+        if #wins > 0 then
+          vim.api.nvim_set_current_win(wins[1])
+        else
+          vim.cmd("buffer " .. found_buf)
+        end
+      else
+        -- Open the file
+        vim.cmd("edit " .. file_path)
+      end
+
+      -- Navigate to the line
+      vim.api.nvim_win_set_cursor(0, { selected_comment.line, 0 })
+      vim.cmd("normal! zz")
+
+      -- Show notification with comment info
+      local status = selected_comment.is_local and "PENDING" or "Posted"
+      vim.notify(
+        string.format("[%s] %s:%d - %s", status, file_path, selected_comment.line, selected_comment.user),
+        vim.log.levels.INFO
+      )
+    end)
   end)
 end
 

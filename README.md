@@ -34,7 +34,6 @@ It is a experimental project and may contain bugs. Use at your own risk.
 - ✅ **Split diff view** - Toggle between unified and split (side-by-side) diff view
 - ✅ **Change tracking** - See your progress with floating indicators (toggle on/off)
 - ✅ **Inline diff** - Built-in diff visualization (no gitsigns required)
-- ✅ **Quickfix integration** - Navigate modified files with `:cnext`/`:cprev`
 
 ### Comment Management
 - 💬 **View comments inline** - PR comments appear as virtual text
@@ -142,10 +141,10 @@ require("github-pr-reviewer").setup({
   -- Key to jump to previous hunk (only works in review mode)
   prev_hunk_key = "<C-k>",
 
-  -- Key to go to next file in quickfix (only works in review mode)
+  -- Key to go to next modified file (only works in review mode)
   next_file_key = "<C-l>",
 
-  -- Key to go to previous file in quickfix (only works in review mode)
+  -- Key to go to previous modified file (only works in review mode)
   prev_file_key = "<C-h>",
 })
 ```
@@ -272,7 +271,7 @@ See the [Commands](#commands) section for the full list.
    - Create a review branch
    - Soft-merge the PR changes (unstaged)
    - Fetch all PR comments
-   - Open the review buffer or quickfix list with all modified files
+   - Open the review buffer with all modified files
 
 ### Review Requests
 
@@ -320,8 +319,8 @@ The plugin includes built-in navigation that only works during PR review mode:
 - `<C-k>` (default) - Jump to previous hunk
 
 **File Navigation** (between modified files):
-- `<C-l>` (default) - Go to next file in quickfix
-- `<C-h>` (default) - Go to previous file in quickfix
+- `<C-l>` (default) - Go to next modified file
+- `<C-h>` (default) - Go to previous modified file
 - `<CR>` (default) - Mark file as viewed and jump to next file
 
 All keybindings are configurable in setup and only activate during PR review mode.
@@ -460,7 +459,6 @@ Set `show_inline_diff = false` if you prefer to use gitsigns or another diff too
    - Revert all PR changes
    - Delete the review branch
    - Return to your original branch
-   - Close the quickfix window
    - Clear the session
 
 ## Complete Workflow Example
@@ -535,10 +533,6 @@ vim.keymap.set("n", "<leader>pd", ":PRDeleteComment<CR>", { desc = "Delete my co
 -- Review actions
 vim.keymap.set("n", "<leader>pa", ":PRApprove<CR>", { desc = "Approve PR" })
 vim.keymap.set("n", "<leader>px", ":PRRequestChanges<CR>", { desc = "Request changes" })
-
--- Quickfix navigation (if not already mapped)
-vim.keymap.set("n", "]q", ":cnext<CR>", { desc = "Next quickfix" })
-vim.keymap.set("n", "[q", ":cprev<CR>", { desc = "Previous quickfix" })
 ```
 
 ## Integration with Other Plugins

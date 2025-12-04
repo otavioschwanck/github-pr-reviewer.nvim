@@ -2,7 +2,7 @@
 
                       GITHUB PR REVIEWER~
 
-Author:  Your Name
+Author:  Otávio Schwanck dos Santos
 License: MIT
 Repository: https://github.com/otavioschwanck/github-pr-reviewer.nvim
 
@@ -47,7 +47,7 @@ to review it.
 ==============================================================================
 2. REQUIREMENTS                                   *github-pr-reviewer-requirements*
 
-• Neovim >= 0.9.0
+• Neovim >= 0.11.0
 • GitHub CLI (`gh`) installed and authenticated
 • Git
 • Optional: bat for syntax-highlighted previews in fzf-lua
@@ -657,7 +657,7 @@ If `bat` is not available, the plugin falls back to `cat`.
 
 MIT License
 
-Copyright (c) 2024 [Your Name]
+Copyright (c) 2024 Otávio Schwanck dos Santos
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to

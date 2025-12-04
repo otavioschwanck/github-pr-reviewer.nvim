@@ -455,7 +455,10 @@ local function display_inline_diff(bufnr, hunks)
 
     -- Show removed lines as virtual text above the first added line
     if #hunk.removed_lines > 0 then
-      local line_idx = new_line - 1
+      -- When new_count is 0 (only deletions), new_start points to the line after the deletion
+      -- So we use new_line directly. When there are additions, we use new_line - 1 to place
+      -- the deletions above the first addition.
+      local line_idx = hunk.new_count == 0 and new_line or (new_line - 1)
 
       local virt_lines = {}
       for _, removed in ipairs(hunk.removed_lines) do
@@ -1845,18 +1848,15 @@ local function update_hunk_navigation_hints()
     return
   end
 
-  -- Show hint only for current hunk
-  local hunk = hunks[current_hunk_idx]
-  local has_prev = current_hunk_idx > 1
-  local has_next = current_hunk_idx < #hunks
+  -- Show hint only if cursor is inside a hunk and there are multiple hunks
   local hint_text = ""
 
-  if has_next and has_prev then
-    hint_text = string.format("  %s to next hunk  •  %s to prev hunk", M.config.next_hunk_key, M.config.prev_hunk_key)
-  elseif has_next then
-    hint_text = string.format("  %s to next hunk", M.config.next_hunk_key)
-  elseif has_prev then
-    hint_text = string.format("  %s to prev hunk", M.config.prev_hunk_key)
+  -- Check if cursor is actually inside the current hunk
+  local cursor_in_hunk = cursor_line >= hunks[current_hunk_idx].start_line and
+                         cursor_line <= hunks[current_hunk_idx].end_line
+
+  if cursor_in_hunk and #hunks > 1 then
+    hint_text = string.format("  %d/%d", current_hunk_idx, #hunks)
   end
 
   if hint_text ~= "" then
@@ -4345,8 +4345,15 @@ function M.setup(opts)
           -- This fixes the issue when user switches buffers with :b or fzf
           if not M._opening_file then  -- Don't interfere with our own navigation
             local buf_name = vim.api.nvim_buf_get_name(args.buf)
-            -- Only auto-fix for regular files (not [BEFORE] buffers)
-            if not buf_name:match("^%[BEFORE%]") then
+            local buftype = vim.bo[args.buf].buftype
+
+            -- Only auto-fix for regular files (not [BEFORE] buffers, not special buffers)
+            -- Skip buffers used by menus, pickers, prompts, terminals, etc.
+            if not buf_name:match("^%[BEFORE%]") and
+               buftype ~= "prompt" and
+               buftype ~= "nofile" and
+               buftype ~= "terminal" and
+               buftype ~= "quickfix" then
               -- Check if we have a split state that doesn't match current buffer
               if M._split_view_state and M._split_view_state.current_buf then
                 -- Only auto-fix if the split state is for a different buffer

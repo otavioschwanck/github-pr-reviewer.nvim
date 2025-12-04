@@ -1862,22 +1862,34 @@ local function update_hunk_navigation_hints()
   if hint_text ~= "" then
     local line_idx = cursor_line - 1
     if line_idx >= 0 and line_idx < vim.api.nvim_buf_line_count(bufnr) then
-      -- Check if current line is a changed line to match background color
-      local is_changed_line = false
-      local changes = M._buffer_changes[bufnr]
-      if changes then
-        for _, change_line in ipairs(changes) do
-          if change_line == cursor_line then
-            is_changed_line = true
-            break
+      -- Get the background color from the current line's highlight
+      -- Check all extmarks on this line to find the line highlight
+      local extmarks = vim.api.nvim_buf_get_extmarks(bufnr, diff_ns_id, { line_idx, 0 }, { line_idx, -1 }, { details = true })
+
+      local line_bg = nil
+      for _, mark in ipairs(extmarks) do
+        local details = mark[4]
+        if details and details.line_hl_group then
+          -- Get the background from the line highlight group
+          local hl = vim.api.nvim_get_hl(0, { name = details.line_hl_group, link = false })
+          if hl.bg then
+            line_bg = hl.bg
           end
+          break
         end
       end
 
-      -- Create custom highlight group for hints with dimmed text
-      -- Use Comment highlight for a dimmed, less prominent color
-      -- Background is transparent (NONE) so it inherits from the current line
-      vim.api.nvim_set_hl(0, "PRHint", { link = "Comment" })
+      -- Create custom highlight group for hints
+      -- Use a bright color (from DiagnosticWarn or Number) with bold
+      local warn_hl = vim.api.nvim_get_hl(0, { name = "DiagnosticWarn", link = false })
+      local hint_fg = warn_hl.fg or vim.api.nvim_get_hl(0, { name = "Number", link = false }).fg
+
+      vim.api.nvim_set_hl(0, "PRHint", {
+        fg = hint_fg,
+        bg = line_bg, -- Use the line's background (or nil for transparent)
+        bold = true,
+      })
+
       vim.api.nvim_buf_set_extmark(bufnr, hunk_hints_ns_id, line_idx, 0, {
         virt_text = { { hint_text, "PRHint" } },
         virt_text_pos = "eol",

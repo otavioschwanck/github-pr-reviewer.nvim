@@ -57,6 +57,7 @@ M._buffer_stats = {}
 M._viewed_files = {}
 M._collapsed_dirs = {}         -- tracks which directories are collapsed in review buffer
 M._local_pending_comments = {} -- Local storage for pending comments (not synced to GitHub yet)
+M._drafts = {}                 -- Draft comments being edited (auto-saved)
 M._float_win_general = nil     -- General info float (file x/total)
 M._float_win_buffer = nil      -- Buffer info float (hunks, stats, comments)
 M._float_win_keymaps = nil     -- Keymaps float
@@ -99,6 +100,7 @@ local function save_session()
     modified_files = vim.g.pr_review_modified_files,
     viewed_files = M._viewed_files,
     pending_comments = M._local_pending_comments,
+    drafts = M._drafts,
     cwd = vim.fn.getcwd(),
   }
 
@@ -2033,7 +2035,7 @@ local function display_comments(bufnr, comments)
       -- Get background color from the current line's highlight
       local line_bg = nil
 
-      -- Check if in split mode
+      -- In split mode, use vim's diff highlight groups
       if M._diff_view_mode == "split" then
         -- Get the diff highlight from vim's native diff mode
         local diff_hl = vim.fn.diff_hlID(line, 1)
@@ -2051,6 +2053,7 @@ local function display_comments(bufnr, comments)
         for _, mark in ipairs(extmarks) do
           local details = mark[4]
           if details and details.line_hl_group then
+            -- Get the background from the line highlight group
             local hl = vim.api.nvim_get_hl(0, { name = details.line_hl_group, link = false })
             if hl.bg then
               line_bg = hl.bg
@@ -2065,9 +2068,16 @@ local function display_comments(bufnr, comments)
       local custom_hl_name = has_pending and "PRCommentPending" or "PRCommentInfo"
       local base_hl = vim.api.nvim_get_hl(0, { name = base_hl_name, link = false })
 
+      -- Use line background, or fallback to Normal background if no diff
+      local comment_bg = line_bg
+      if not comment_bg then
+        local normal_hl = vim.api.nvim_get_hl(0, { name = "Normal", link = false })
+        comment_bg = normal_hl.bg
+      end
+
       vim.api.nvim_set_hl(0, custom_hl_name, {
         fg = base_hl.fg,
-        bg = line_bg, -- Use the line's background (or nil for transparent)
+        bg = comment_bg,
       })
 
       vim.api.nvim_buf_set_extmark(bufnr, ns_id, line_idx, 0, {
@@ -2185,11 +2195,12 @@ function M.load_comments_for_buffer(bufnr, force_reload)
 
       if comments and #comments > 0 then
         M._buffer_comments[bufnr] = comments
-        vim.schedule(function()
+        -- Use defer_fn with a delay to ensure diff highlights are applied first
+        vim.defer_fn(function()
           if vim.api.nvim_buf_is_valid(bufnr) then
             display_comments(bufnr, comments)
           end
-        end)
+        end, 50)
       else
         M._buffer_comments[bufnr] = nil
         vim.schedule(function()
@@ -2202,7 +2213,70 @@ function M.load_comments_for_buffer(bufnr, force_reload)
   end)
 end
 
-local function input_multiline(prompt, callback, initial_text)
+-- Draft management functions
+local function get_draft_key(pr_number, file_path, line, action, comment_id)
+  -- Create unique key for draft: pr_number:file:line:action[:comment_id]
+  local key = string.format("%d:%s:%d:%s", pr_number, file_path or "", line or 0, action)
+  if comment_id then
+    key = key .. ":" .. tostring(comment_id)
+  end
+  return key
+end
+
+local function save_draft(pr_number, file_path, line, action, comment_id, text)
+  if not text or text == "" then
+    return
+  end
+  local key = get_draft_key(pr_number, file_path, line, action, comment_id)
+  if not M._drafts[pr_number] then
+    M._drafts[pr_number] = {}
+  end
+  M._drafts[pr_number][key] = {
+    text = text,
+    timestamp = os.time(),
+    file_path = file_path,
+    line = line,
+    action = action,
+    comment_id = comment_id,
+  }
+  save_session()
+end
+
+local function get_draft(pr_number, file_path, line, action, comment_id)
+  local key = get_draft_key(pr_number, file_path, line, action, comment_id)
+  if M._drafts[pr_number] and M._drafts[pr_number][key] then
+    return M._drafts[pr_number][key].text
+  end
+  return nil
+end
+
+local function clear_draft(pr_number, file_path, line, action, comment_id)
+  local key = get_draft_key(pr_number, file_path, line, action, comment_id)
+  if M._drafts[pr_number] then
+    M._drafts[pr_number][key] = nil
+  end
+  save_session()
+end
+
+local function input_multiline(prompt, callback, initial_text, draft_info)
+  -- draft_info: { pr_number, file_path, line, action, comment_id }
+  local pr_number = vim.g.pr_review_number
+
+  -- Check if there's a saved draft
+  if draft_info and pr_number then
+    local draft_text = get_draft(
+      pr_number,
+      draft_info.file_path,
+      draft_info.line,
+      draft_info.action,
+      draft_info.comment_id
+    )
+    if draft_text and (not initial_text or initial_text == "") then
+      initial_text = draft_text
+      prompt = prompt .. " [DRAFT RESTORED]"
+    end
+  end
+
   local buf = vim.api.nvim_create_buf(false, true)
   local width = math.floor(vim.o.columns * 0.6)
   local height = math.floor(vim.o.lines * 0.4)
@@ -2223,14 +2297,36 @@ local function input_multiline(prompt, callback, initial_text)
   vim.bo[buf].bufhidden = "wipe"
 
   -- Set initial text if provided
+  local has_initial_text = false
   if initial_text then
     local lines = vim.split(initial_text, "\n")
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
     -- Move cursor to the end
-    vim.api.nvim_win_set_cursor(win, { #lines, #lines[#lines] })
+    local last_line = #lines
+    vim.api.nvim_win_set_cursor(win, { last_line, 0 })
+    has_initial_text = true
+  end
+
+  -- Save draft function
+  local function save_current_draft()
+    if draft_info and pr_number then
+      local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+      local text = table.concat(lines, "\n")
+      if text and text ~= "" then
+        save_draft(
+          pr_number,
+          draft_info.file_path,
+          draft_info.line,
+          draft_info.action,
+          draft_info.comment_id,
+          text
+        )
+      end
+    end
   end
 
   vim.keymap.set("n", "<Esc>", function()
+    save_current_draft()
     vim.api.nvim_win_close(win, true)
     vim.cmd("stopinsert")
     callback(nil)
@@ -2239,6 +2335,18 @@ local function input_multiline(prompt, callback, initial_text)
   vim.keymap.set({ "n", "i" }, "<C-s>", function()
     local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
     local text = table.concat(lines, "\n")
+
+    -- Clear draft on successful submit
+    if draft_info and pr_number and text ~= "" then
+      clear_draft(
+        pr_number,
+        draft_info.file_path,
+        draft_info.line,
+        draft_info.action,
+        draft_info.comment_id
+      )
+    end
+
     vim.api.nvim_win_close(win, true)
     vim.cmd("stopinsert")
     if text ~= "" then
@@ -2248,8 +2356,26 @@ local function input_multiline(prompt, callback, initial_text)
     end
   end, { buffer = buf })
 
+  -- Auto-save draft when window is closed unexpectedly
+  vim.api.nvim_create_autocmd("BufLeave", {
+    buffer = buf,
+    once = true,
+    callback = function()
+      vim.defer_fn(function()
+        -- Only save if buffer still exists and window was closed
+        if vim.api.nvim_buf_is_valid(buf) and not vim.api.nvim_win_is_valid(win) then
+          save_current_draft()
+        end
+      end, 10)
+    end,
+  })
+
   -- Enter insert mode automatically
-  vim.cmd("startinsert")
+  if has_initial_text then
+    vim.cmd("startinsert!")  -- Append at end of line
+  else
+    vim.cmd("startinsert")
+  end
 end
 
 -- Show pending comments in a preview buffer
@@ -2378,7 +2504,12 @@ function M.approve_pr()
           end
         end)
       end
-    end)
+    end, nil, {
+      pr_number = pr_number,
+      file_path = nil,
+      line = nil,
+      action = "approve_pr",
+    })
   end)
 end
 
@@ -2437,7 +2568,12 @@ function M.request_changes()
           end
         end)
       end
-    end)
+    end, nil, {
+      pr_number = pr_number,
+      file_path = nil,
+      line = nil,
+      action = "request_changes",
+    })
   end)
 end
 
@@ -2486,7 +2622,12 @@ function M.submit_pending_comments()
           vim.notify("❌ Failed to submit comments: " .. (err or "unknown"), vim.log.levels.ERROR)
         end
       end)
-    end)
+    end, nil, {
+      pr_number = pr_number,
+      file_path = nil,
+      line = nil,
+      action = "submit_pending",
+    })
   end)
 end
 
@@ -2509,7 +2650,12 @@ function M.add_comment()
         vim.notify("❌ Failed to add comment: " .. (err or "unknown"), vim.log.levels.ERROR)
       end
     end)
-  end)
+  end, nil, {
+    pr_number = pr_number,
+    file_path = nil,
+    line = nil,
+    action = "add_pr_comment",
+  })
 end
 
 -- Build a comment thread by following in_reply_to_id
@@ -2587,7 +2733,25 @@ end
 
 -- Input reply with conversation context
 -- Input new comment with conversation context (like reply but for new comments)
-local function input_comment_with_context(target_comment, all_comments, prompt_title, callback)
+local function input_comment_with_context(target_comment, all_comments, prompt_title, callback, draft_info)
+  -- draft_info: { pr_number, file_path, line, action, comment_id }
+  local pr_number = vim.g.pr_review_number
+
+  -- Check if there's a saved draft
+  local draft_text = nil
+  if draft_info and pr_number then
+    draft_text = get_draft(
+      pr_number,
+      draft_info.file_path,
+      draft_info.line,
+      draft_info.action,
+      draft_info.comment_id
+    )
+    if draft_text then
+      prompt_title = prompt_title .. " [DRAFT RESTORED]"
+    end
+  end
+
   local buf = vim.api.nvim_create_buf(false, true)
   local width = math.floor(vim.o.columns * 0.7)
   local height = math.floor(vim.o.lines * 0.6)
@@ -2641,7 +2805,14 @@ local function input_comment_with_context(target_comment, all_comments, prompt_t
   table.insert(lines, "--- Answer here: ---")
   table.insert(lines, "")
 
-  local separator_line = #lines - 1
+  -- Add draft text if exists
+  if draft_text then
+    for draft_line in draft_text:gmatch("[^\r\n]+") do
+      table.insert(lines, draft_line)
+    end
+  end
+
+  local separator_line = #lines - (draft_text and vim.tbl_count(vim.split(draft_text, "\n")) or 1)
 
   -- Set the content
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
@@ -2656,7 +2827,38 @@ local function input_comment_with_context(target_comment, all_comments, prompt_t
   vim.api.nvim_buf_add_highlight(buf, ns_id, "Comment", separator_line - 1, 0, -1)
   vim.api.nvim_buf_add_highlight(buf, ns_id, "Title", 0, 0, -1)
 
+  -- Save draft function
+  local function save_current_draft()
+    if draft_info and pr_number then
+      local all_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+
+      -- Extract only the lines after the separator
+      local comment_lines = {}
+      local found_separator = false
+      for i, line in ipairs(all_lines) do
+        if line:match("^%-%-%-+ Answer here:") then
+          found_separator = true
+        elseif found_separator and line ~= "" then
+          table.insert(comment_lines, line)
+        end
+      end
+
+      local text = table.concat(comment_lines, "\n"):gsub("^%s+", ""):gsub("%s+$", "")
+      if text and text ~= "" then
+        save_draft(
+          pr_number,
+          draft_info.file_path,
+          draft_info.line,
+          draft_info.action,
+          draft_info.comment_id,
+          text
+        )
+      end
+    end
+  end
+
   vim.keymap.set("n", "<Esc>", function()
+    save_current_draft()
     vim.api.nvim_win_close(win, true)
     vim.cmd("stopinsert")
     callback(nil)
@@ -2678,6 +2880,17 @@ local function input_comment_with_context(target_comment, all_comments, prompt_t
 
     local text = table.concat(comment_lines, "\n"):gsub("^%s+", ""):gsub("%s+$", "")
 
+    -- Clear draft on successful submit
+    if draft_info and pr_number and text ~= "" then
+      clear_draft(
+        pr_number,
+        draft_info.file_path,
+        draft_info.line,
+        draft_info.action,
+        draft_info.comment_id
+      )
+    end
+
     vim.api.nvim_win_close(win, true)
     vim.cmd("stopinsert")
 
@@ -2688,11 +2901,36 @@ local function input_comment_with_context(target_comment, all_comments, prompt_t
     end
   end, { buffer = buf })
 
+  -- Auto-save draft when window is closed unexpectedly
+  vim.api.nvim_create_autocmd("BufLeave", {
+    buffer = buf,
+    once = true,
+    callback = function()
+      vim.defer_fn(function()
+        -- Only save if buffer still exists and window was closed
+        if vim.api.nvim_buf_is_valid(buf) and not vim.api.nvim_win_is_valid(win) then
+          save_current_draft()
+        end
+      end, 10)
+    end,
+  })
+
   -- Position cursor at the answer section
-  vim.api.nvim_win_set_cursor(win, { separator_line + 1, 0 })
+  if draft_text then
+    -- If draft exists, position cursor at the end of the text
+    local last_line = #lines
+    vim.api.nvim_win_set_cursor(win, { last_line, 0 })
+  else
+    -- No draft, position at the start of answer section
+    vim.api.nvim_win_set_cursor(win, { separator_line + 1, 0 })
+  end
 
   -- Enter insert mode automatically
-  vim.cmd("startinsert")
+  if draft_text then
+    vim.cmd("startinsert!")  -- Append at end of line
+  else
+    vim.cmd("startinsert")
+  end
 end
 
 -- Show thread before adding/editing comment (deprecated - use input_comment_with_context instead)
@@ -2785,7 +3023,26 @@ local function show_reply_thread(target_comment, all_comments, callback)
   vim.keymap.set("n", "q", close_and_cancel, { buffer = buf, nowait = true })
 end
 
-local function input_reply_with_context(target_comment, all_comments, callback)
+local function input_reply_with_context(target_comment, all_comments, callback, draft_info)
+  -- draft_info: { pr_number, file_path, line, action, comment_id }
+  local pr_number = vim.g.pr_review_number
+  local prompt_title = "Reply to " .. target_comment.user
+
+  -- Check if there's a saved draft
+  local draft_text = nil
+  if draft_info and pr_number then
+    draft_text = get_draft(
+      pr_number,
+      draft_info.file_path,
+      draft_info.line,
+      draft_info.action,
+      draft_info.comment_id
+    )
+    if draft_text then
+      prompt_title = prompt_title .. " [DRAFT RESTORED]"
+    end
+  end
+
   local buf = vim.api.nvim_create_buf(false, true)
   local width = math.floor(vim.o.columns * 0.7)
   local height = math.floor(vim.o.lines * 0.6)
@@ -2798,7 +3055,7 @@ local function input_reply_with_context(target_comment, all_comments, callback)
     row = math.floor((vim.o.lines - height) / 2),
     style = "minimal",
     border = "rounded",
-    title = " Reply to " .. target_comment.user .. " (save: <C-s>, cancel: <Esc>) ",
+    title = " " .. prompt_title .. " (save: <C-s>, cancel: <Esc>) ",
     title_pos = "center",
   })
 
@@ -2835,7 +3092,14 @@ local function input_reply_with_context(target_comment, all_comments, callback)
   table.insert(lines, "--- Answer here: ---")
   table.insert(lines, "")
 
-  local separator_line = #lines - 1
+  -- Add draft text if exists
+  if draft_text then
+    for draft_line in draft_text:gmatch("[^\r\n]+") do
+      table.insert(lines, draft_line)
+    end
+  end
+
+  local separator_line = #lines - (draft_text and vim.tbl_count(vim.split(draft_text, "\n")) or 1)
 
   -- Set the content
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
@@ -2850,7 +3114,38 @@ local function input_reply_with_context(target_comment, all_comments, callback)
   vim.api.nvim_buf_add_highlight(buf, ns_id, "Comment", separator_line - 1, 0, -1)
   vim.api.nvim_buf_add_highlight(buf, ns_id, "Title", 0, 0, -1)
 
+  -- Save draft function
+  local function save_current_draft()
+    if draft_info and pr_number then
+      local all_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+
+      -- Extract only the lines after the separator
+      local reply_lines = {}
+      local found_separator = false
+      for i, line in ipairs(all_lines) do
+        if line:match("^%-%-%-+ Answer here:") then
+          found_separator = true
+        elseif found_separator and line ~= "" then
+          table.insert(reply_lines, line)
+        end
+      end
+
+      local text = table.concat(reply_lines, "\n"):gsub("^%s+", ""):gsub("%s+$", "")
+      if text and text ~= "" then
+        save_draft(
+          pr_number,
+          draft_info.file_path,
+          draft_info.line,
+          draft_info.action,
+          draft_info.comment_id,
+          text
+        )
+      end
+    end
+  end
+
   vim.keymap.set("n", "<Esc>", function()
+    save_current_draft()
     vim.api.nvim_win_close(win, true)
     vim.cmd("stopinsert")
     callback(nil)
@@ -2872,6 +3167,17 @@ local function input_reply_with_context(target_comment, all_comments, callback)
 
     local text = table.concat(reply_lines, "\n"):gsub("^%s+", ""):gsub("%s+$", "")
 
+    -- Clear draft on successful submit
+    if draft_info and pr_number and text ~= "" then
+      clear_draft(
+        pr_number,
+        draft_info.file_path,
+        draft_info.line,
+        draft_info.action,
+        draft_info.comment_id
+      )
+    end
+
     vim.api.nvim_win_close(win, true)
     vim.cmd("stopinsert")
 
@@ -2882,11 +3188,36 @@ local function input_reply_with_context(target_comment, all_comments, callback)
     end
   end, { buffer = buf })
 
+  -- Auto-save draft when window is closed unexpectedly
+  vim.api.nvim_create_autocmd("BufLeave", {
+    buffer = buf,
+    once = true,
+    callback = function()
+      vim.defer_fn(function()
+        -- Only save if buffer still exists and window was closed
+        if vim.api.nvim_buf_is_valid(buf) and not vim.api.nvim_win_is_valid(win) then
+          save_current_draft()
+        end
+      end, 10)
+    end,
+  })
+
   -- Position cursor at the answer section
-  vim.api.nvim_win_set_cursor(win, { separator_line + 1, 0 })
+  if draft_text then
+    -- If draft exists, position cursor at the end of the text
+    local last_line = #lines
+    vim.api.nvim_win_set_cursor(win, { last_line, 0 })
+  else
+    -- No draft, position at the start of answer section
+    vim.api.nvim_win_set_cursor(win, { separator_line + 1, 0 })
+  end
 
   -- Enter insert mode automatically
-  vim.cmd("startinsert")
+  if draft_text then
+    vim.cmd("startinsert!")  -- Append at end of line
+  else
+    vim.cmd("startinsert")
+  end
 end
 
 function M.add_review_comment_with_selection()
@@ -2932,7 +3263,12 @@ function M.add_review_comment_with_selection()
           vim.notify("❌ Failed to add suggestion: " .. (err or "unknown"), vim.log.levels.ERROR)
         end
       end, start_line)
-    end, suggestion_text)
+    end, suggestion_text, {
+      pr_number = pr_number,
+      file_path = file_path,
+      line = end_line,
+      action = "add_review_suggestion",
+    })
 end
 
 function M.add_pending_comment_with_selection()
@@ -2986,7 +3322,12 @@ function M.add_pending_comment_with_selection()
         -- Reload comments to show the new pending comment
         M.load_comments_for_buffer(bufnr, false)
       end)
-    end, suggestion_text)
+    end, suggestion_text, {
+      pr_number = pr_number,
+      file_path = file_path,
+      line = end_line,
+      action = "add_pending_suggestion",
+    })
 end
 
 function M.add_review_comment()
@@ -3024,7 +3365,13 @@ function M.add_review_comment()
           vim.notify("❌ Failed to add review comment: " .. (err or "unknown"), vim.log.levels.ERROR)
         end
       end)
-    end)
+    end, {
+      pr_number = pr_number,
+      file_path = file_path,
+      line = cursor_line,
+      action = "add_review_comment",
+      comment_id = line_comments[1].id,
+    })
   else
     -- No existing comments, just prompt for input
     input_multiline("Review comment for line " .. cursor_line, function(body)
@@ -3040,7 +3387,12 @@ function M.add_review_comment()
           vim.notify("❌ Failed to add review comment: " .. (err or "unknown"), vim.log.levels.ERROR)
         end
       end)
-    end)
+    end, nil, {
+      pr_number = pr_number,
+      file_path = file_path,
+      line = cursor_line,
+      action = "add_review_comment",
+    })
   end
 end
 
@@ -3085,7 +3437,13 @@ function M.add_pending_comment()
         -- Reload comments to show the new pending comment
         M.load_comments_for_buffer(bufnr, false)
       end)
-    end)
+    end, {
+      pr_number = pr_number,
+      file_path = file_path,
+      line = cursor_line,
+      action = "add_pending_thread",
+      comment_id = line_comments[1].id,
+    })
   else
     -- No existing comments, just prompt for input
     input_multiline("Pending comment for line " .. cursor_line .. " (will be posted with review)", function(body)
@@ -3107,7 +3465,13 @@ function M.add_pending_comment()
         -- Reload comments to show the new pending comment
         M.load_comments_for_buffer(bufnr, false)
       end)
-    end)
+    end, nil, {
+      pr_number = pr_number,
+      file_path = file_path,
+      line = cursor_line,
+      action = "add_pending",
+      comment_id = nil,
+    })
   end
 end
 
@@ -3420,7 +3784,13 @@ function M.list_global_comments()
               end
             end)
           end
-        end, initial_text)
+        end, initial_text, {
+          pr_number = pr_number,
+          file_path = nil,
+          line = nil,
+          action = "reply_global",
+          comment_id = comment.id,
+        })
       end, { buffer = buf })
 
       -- Auto-close if user leaves the buffer (e.g., switches windows)
@@ -3469,6 +3839,7 @@ function M.reply_to_comment()
       return
     end
 
+    local file_path = get_relative_path(bufnr)
     input_reply_with_context(comment, comments, function(body)
       if not body then
         return
@@ -3482,7 +3853,13 @@ function M.reply_to_comment()
           vim.notify("❌ Failed to reply: " .. (err or "unknown"), vim.log.levels.ERROR)
         end
       end)
-    end)
+    end, {
+      pr_number = pr_number,
+      file_path = file_path,
+      line = cursor_line,
+      action = "reply",
+      comment_id = comment.id,
+    })
   end
 
   if #line_comments == 1 then
@@ -3547,10 +3924,19 @@ function M.edit_my_comment()
         local width = math.floor(vim.o.columns * 0.7)
         local height = math.floor(vim.o.lines * 0.6)
 
+        -- Check for existing draft
+        local file_path = get_relative_path(bufnr)
+        local draft_key = get_draft_key(pr_number, file_path, cursor_line, "edit", comment.id)
+        local has_draft = M._drafts[pr_number] and M._drafts[pr_number][draft_key]
+
         -- Set title based on comment type
         local title = comment.is_local
             and " Edit PENDING comment (save: <C-s>, cancel: <Esc>) "
             or " Edit comment (save: <C-s>, cancel: <Esc>) "
+
+        if has_draft then
+          title = " [DRAFT RESTORED] Edit comment (save: <C-s>, cancel: <Esc>) "
+        end
 
         local win = vim.api.nvim_open_win(buf, true, {
           relative = "editor",
@@ -3600,8 +3986,9 @@ function M.edit_my_comment()
 
         local separator_line = #lines > 0 and (#lines - 1) or 0
 
-        -- Add current comment text
-        for line in comment.body:gmatch("[^\r\n]+") do
+        -- Add current comment text (or draft if it exists)
+        local text_to_edit = has_draft and has_draft.text or comment.body
+        for line in text_to_edit:gmatch("[^\r\n]+") do
           table.insert(lines, line)
         end
 
@@ -3614,7 +4001,33 @@ function M.edit_my_comment()
           vim.api.nvim_buf_add_highlight(buf, ns_id, "Title", 0, 0, -1)
         end
 
+        -- Position cursor at the end of the text
+        local last_line = #lines
+        vim.api.nvim_win_set_cursor(win, { last_line, 0 })
+
         vim.keymap.set("n", "<Esc>", function()
+          -- Save draft before closing
+          local new_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+          local text
+          if separator_line > 0 then
+            local edit_lines = {}
+            local found_separator = false
+            for i, line in ipairs(new_lines) do
+              if line:match("^%-%-%-+ Edit your comment below:") then
+                found_separator = true
+              elseif found_separator and line ~= "" then
+                table.insert(edit_lines, line)
+              end
+            end
+            text = table.concat(edit_lines, "\n"):gsub("^%s+", ""):gsub("%s+$", "")
+          else
+            text = table.concat(new_lines, "\n"):gsub("^%s+", ""):gsub("%s+$", "")
+          end
+
+          if text ~= "" then
+            save_draft(pr_number, file_path, cursor_line, "edit", comment.id, text)
+          end
+
           vim.api.nvim_win_close(win, true)
           vim.cmd("stopinsert")
         end, { buffer = buf })
@@ -3663,6 +4076,9 @@ function M.edit_my_comment()
               -- Save session to persist changes
               save_session()
 
+              -- Clear draft after successful save
+              clear_draft(pr_number, file_path, cursor_line, "edit", comment.id)
+
               vim.notify("✅ Local pending comment updated", vim.log.levels.INFO)
               M.load_comments_for_buffer(bufnr, false)
             else
@@ -3670,6 +4086,9 @@ function M.edit_my_comment()
               vim.notify("Updating comment...", vim.log.levels.INFO)
               github.edit_comment(pr_number, comment.id, text, function(ok, edit_err)
                 if ok then
+                  -- Clear draft after successful save
+                  clear_draft(pr_number, file_path, cursor_line, "edit", comment.id)
+
                   vim.notify("✅ Comment updated", vim.log.levels.INFO)
                   M.load_comments_for_buffer(bufnr, true)
                 else
@@ -3681,7 +4100,7 @@ function M.edit_my_comment()
         end, { buffer = buf })
 
         -- Enter insert mode automatically
-        vim.cmd("startinsert")
+        vim.cmd("startinsert!")  -- Append at end of line
       end
 
       -- Thread is now shown inline in the edit buffer
@@ -3811,6 +4230,7 @@ function M.load_last_session()
   vim.g.pr_review_modified_files = session_data.modified_files
   M._viewed_files = session_data.viewed_files or {}
   M._local_pending_comments = session_data.pending_comments or {}
+  M._drafts = session_data.drafts or {}
 
   -- Open review buffer and first file
   M.open_review_buffer(function()

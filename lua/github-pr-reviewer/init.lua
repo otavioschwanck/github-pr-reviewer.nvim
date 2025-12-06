@@ -4742,18 +4742,28 @@ function M.setup(opts)
   end, { desc = "Show PR Reviewer command menu (alias for PRReviewMenu)" })
 
   -- Visual mode suggestion command
-  vim.api.nvim_create_user_command("PRSuggestChange", function()
-    -- Get visual selection
-    local start_pos = vim.fn.getpos("'<")
-    local end_pos = vim.fn.getpos("'>")
+  -- Recommended keybind: vim.keymap.set('v', '<leader>gs', ':<C-u>\'<,\'>PRSuggestChange<CR>', { desc = 'Suggest change' })
+  -- This ensures the range is always passed correctly
+  vim.api.nvim_create_user_command("PRSuggestChange", function(args)
+    local start_line, end_line
 
-    if start_pos[2] == 0 or end_pos[2] == 0 then
-      vim.notify("No visual selection. Select code first with V or v", vim.log.levels.WARN)
-      return
+    -- Get visual selection from range if provided (when called with ':<,'>PRSuggestChange')
+    if args.range > 0 then
+      start_line = args.line1
+      end_line = args.line2
+    else
+      -- Fallback to marks (when called with '<cmd>PRSuggestChange<CR>')
+      local start_pos = vim.fn.getpos("'<")
+      local end_pos = vim.fn.getpos("'>")
+
+      if start_pos[2] == 0 or end_pos[2] == 0 then
+        vim.notify("No visual selection. Select code first with V or v", vim.log.levels.WARN)
+        return
+      end
+
+      start_line = start_pos[2]
+      end_line = end_pos[2]
     end
-
-    local start_line = start_pos[2]
-    local end_line = end_pos[2]
 
     -- Get the full lines
     local lines = vim.api.nvim_buf_get_lines(0, start_line - 1, end_line, false)

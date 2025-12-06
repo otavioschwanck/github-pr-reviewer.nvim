@@ -76,7 +76,7 @@ It is a experimental project and may contain bugs. Use at your own risk.
   },
   keys = {
     { "<leader>p", "<cmd>PRReviewMenu<cr>",    desc = "PR Review Menu" },
-    { "<leader>p", "<cmd>PRSuggestChange<CR>", desc = "Suggest change", mode = "v" }
+    { "<leader>p", ":<C-u>'<,'>PRSuggestChange<CR>", desc = "Suggest change", mode = "v" }
   }
 }
 ```
@@ -88,6 +88,10 @@ use {
   "otavioschwanck/github-pr-reviewer.nvim",
   config = function()
     require("github-pr-reviewer").setup()
+
+    -- Recommended keymaps
+    vim.keymap.set("n", "<leader>p", "<cmd>PRReviewMenu<cr>", { desc = "PR Review Menu" })
+    vim.keymap.set("v", "<leader>p", ":<C-u>'<,'>PRSuggestChange<CR>", { desc = "Suggest change" })
   end
 }
 ```
@@ -98,7 +102,13 @@ use {
 Plug 'otavioschwanck/github-pr-reviewer.nvim'
 
 " In your init.vim or init.lua
-lua require("github-pr-reviewer").setup()
+lua << EOF
+  require("github-pr-reviewer").setup()
+
+  -- Recommended keymaps
+  vim.keymap.set("n", "<leader>p", "<cmd>PRReviewMenu<cr>", { desc = "PR Review Menu" })
+  vim.keymap.set("v", "<leader>p", ":<C-u>'<,'>PRSuggestChange<CR>", { desc = "Suggest change" })
+EOF
 ```
 
 ## Configuration

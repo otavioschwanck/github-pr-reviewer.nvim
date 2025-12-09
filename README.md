@@ -36,13 +36,14 @@ It is a experimental project and may contain bugs. Use at your own risk.
 - ✅ **Inline diff** - Built-in diff visualization (no gitsigns required)
 
 ### Comment Management
-- 💬 **View comments inline** - PR comments appear as virtual text
+- 💬 **View comments inline** - PR comments appear as virtual text with reactions
 - 💬 **Add line comments** - Comment on specific lines with context
 - 💬 **Pending comments** - Draft comments locally, submit all at once
 - 💬 **List all comments** - Browse all PR comments (posted + pending) with file preview
 - 💬 **Reply to comments** - Continue conversation threads
 - 💬 **Edit/Delete** - Modify or remove your comments
 - 💬 **Comment threads** - View full conversation context when replying
+- 👍 **Emoji reactions** - Add/remove GitHub reactions (👍 👎 😄 🎉 😕 ❤️ 🚀 👀) to comments
 
 ### Review Actions
 - ✓ **Approve PRs** - Submit approval with optional comment
@@ -191,6 +192,7 @@ require("github-pr-reviewer").setup({
 | `:PRReply` | Reply to a comment on the current line |
 | `:PREditComment` | Edit your comment (works for both pending and posted) |
 | `:PRDeleteComment` | Delete your comment on the current line |
+| `:PRToggleReaction` | Toggle emoji reaction on a comment at the current line |
 
 ### Review Actions
 
@@ -216,6 +218,7 @@ From the menu, press:
 - `b` - Toggle review buffer (see all changed files)
 - `i` - Show PR info (stats, reviews, CI checks)
 - `o` - Open PR in browser
+- `R` - Toggle emoji reaction on comment at cursor
 - `a` - **Approve** the PR
 - `x` - **Request changes** on the PR
 - `c` - Cleanup and exit review mode
@@ -417,6 +420,14 @@ Benefits:
 - `:PRReply` - Reply to a comment (cannot reply to pending comments)
 - `:PREditComment` - Edit your comment (works for both pending and posted)
 - `:PRDeleteComment` - Delete your comment
+- `:PRToggleReaction` - Add or remove an emoji reaction to a comment
+
+**React to Comments:**
+- Position cursor on a line with a comment
+- Use `:PRToggleReaction` or press `R` in the `:PR` menu
+- Select an emoji (👍 👎 😄 🎉 😕 ❤️ 🚀 👀)
+- Selecting the same reaction again removes it (toggle behavior)
+- Reactions appear inline next to comment indicators and in comment previews
 
 **List All Comments** (`:PRListAllComments`):
 - Shows both pending and posted comments
@@ -539,6 +550,7 @@ vim.keymap.set("n", "<leader>pp", ":PRListPendingComments<CR>", { desc = "List p
 vim.keymap.set("n", "<leader>pR", ":PRReply<CR>", { desc = "Reply to comment" })
 vim.keymap.set("n", "<leader>pe", ":PREditComment<CR>", { desc = "Edit my comment" })
 vim.keymap.set("n", "<leader>pd", ":PRDeleteComment<CR>", { desc = "Delete my comment" })
+vim.keymap.set("n", "<leader>pE", ":PRToggleReaction<CR>", { desc = "Toggle emoji reaction" })
 
 -- Review actions
 vim.keymap.set("n", "<leader>pa", ":PRApprove<CR>", { desc = "Approve PR" })

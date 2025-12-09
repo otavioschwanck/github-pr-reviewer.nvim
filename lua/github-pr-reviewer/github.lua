@@ -524,15 +524,37 @@ function M.fetch_pr_comments(pr_number, callback)
               user = comment.user,
               created_at = comment.created_at,
               in_reply_to_id = comment.in_reply_to_id,
+              reactions = {},
             })
           end
         end
       end
 
-      M._comments_cache[pr_number] = comments
-      vim.schedule(function()
-        callback(comments, nil)
-      end)
+      -- Fetch reactions for all comments
+      if #comments == 0 then
+        M._comments_cache[pr_number] = comments
+        vim.schedule(function()
+          callback(comments, nil)
+        end)
+        return
+      end
+
+      local pending = #comments
+      for _, comment in ipairs(comments) do
+        M.get_comment_reactions(comment.id, function(reactions, err)
+          if not err and reactions then
+            comment.reactions = reactions
+          end
+
+          pending = pending - 1
+          if pending == 0 then
+            M._comments_cache[pr_number] = comments
+            vim.schedule(function()
+              callback(comments, nil)
+            end)
+          end
+        end)
+      end
     end,
     on_stderr = function(_, data)
       if data and data[1] and data[1] ~= "" then
@@ -1114,6 +1136,7 @@ function M.get_pending_review_comments(pr_number, callback)
                       user = comment.user and comment.user.login or comment.user,
                       created_at = comment.created_at,
                       in_reply_to_id = comment.in_reply_to_id,
+                      reactions = {},
                     })
                   end
                 end
@@ -1139,6 +1162,120 @@ function M.get_pending_review_comments(pr_number, callback)
           end,
         })
       end
+    end,
+  })
+end
+
+-- Get reactions for a comment
+function M.get_comment_reactions(comment_id, callback)
+  -- PR review comments use /pulls/comments, not /issues/comments
+  local cmd = string.format(
+    "gh api repos/{owner}/{repo}/pulls/comments/%d/reactions --jq '.[] | {id: .id, content: .content, user: .user.login}'",
+    comment_id
+  )
+
+  vim.fn.jobstart(cmd, {
+    stdout_buffered = true,
+    on_stdout = function(_, data)
+      if not data or #data == 0 or (data[1] == "" and #data == 1) then
+        vim.schedule(function()
+          callback({}, nil)
+        end)
+        return
+      end
+
+      local reactions = {}
+      for _, line in ipairs(data) do
+        if line and line ~= "" then
+          local ok, reaction = pcall(vim.fn.json_decode, line)
+          if ok and reaction then
+            table.insert(reactions, {
+              id = reaction.id,
+              content = reaction.content,
+              user = reaction.user,
+            })
+          end
+        end
+      end
+
+      vim.schedule(function()
+        callback(reactions, nil)
+      end)
+    end,
+    on_stderr = function(_, data)
+      if data and data[1] and data[1] ~= "" then
+        vim.schedule(function()
+          callback(nil, table.concat(data, "\n"))
+        end)
+      end
+    end,
+  })
+end
+
+-- Add a reaction to a comment
+-- content can be: "+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"
+function M.add_comment_reaction(comment_id, content, callback)
+  local json_body = vim.fn.json_encode({
+    content = content,
+  })
+
+  -- PR review comments use /pulls/comments, not /issues/comments
+  local cmd = string.format(
+    "gh api repos/{owner}/{repo}/pulls/comments/%d/reactions -X POST --input - -H 'Accept: application/vnd.github+json'",
+    comment_id
+  )
+
+  local stderr_output = {}
+  local stdout_output = {}
+  local job_id = vim.fn.jobstart(cmd, {
+    stdout_buffered = true,
+    stderr_buffered = true,
+    on_stdout = function(_, data)
+      if data then
+        vim.list_extend(stdout_output, data)
+      end
+    end,
+    on_stderr = function(_, data)
+      if data then
+        vim.list_extend(stderr_output, data)
+      end
+    end,
+    on_exit = function(_, code)
+      vim.schedule(function()
+        if code == 0 then
+          callback(true, nil)
+        else
+          local err_msg = table.concat(stderr_output, "\n")
+          local out_msg = table.concat(stdout_output, "\n")
+          local full_error = err_msg ~= "" and err_msg or out_msg
+          callback(false, full_error ~= "" and full_error or "Failed to add reaction (unknown error)")
+        end
+      end)
+    end,
+  })
+
+  vim.fn.chansend(job_id, json_body)
+  vim.fn.chanclose(job_id, "stdin")
+end
+
+-- Remove a reaction from a comment
+function M.remove_comment_reaction(comment_id, reaction_id, callback)
+  -- PR review comments use /pulls/comments, not /issues/comments
+  local cmd = string.format(
+    "gh api repos/{owner}/{repo}/pulls/comments/%d/reactions/%d -X DELETE -H 'Accept: application/vnd.github+json'",
+    comment_id,
+    reaction_id
+  )
+
+  vim.fn.jobstart(cmd, {
+    on_exit = function(_, code)
+      vim.schedule(function()
+        if code == 0 then
+          callback(true, nil)
+        else
+          callback(false, "Failed to remove reaction")
+        end
+      end)
     end,
   })
 end

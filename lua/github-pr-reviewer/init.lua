@@ -162,6 +162,7 @@ local function add_local_pending_comment(pr_number, path, line, body, user, star
     created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
     is_pending = true,
     is_local = true,
+    reactions = {},
   }
 
   -- Add start_line for multi-line suggestions
@@ -1992,6 +1993,81 @@ local function count_comments_at_line(comments, line)
   return count
 end
 
+-- Map GitHub reaction content to emoji
+local reaction_emoji_map = {
+  ["+1"] = "👍",
+  ["-1"] = "👎",
+  ["laugh"] = "😄",
+  ["confused"] = "😕",
+  ["heart"] = "❤️",
+  ["hooray"] = "🎉",
+  ["rocket"] = "🚀",
+  ["eyes"] = "👀",
+}
+
+-- Format reactions for a single comment
+local function format_comment_reactions(comment)
+  if not comment.reactions or type(comment.reactions) ~= "table" or #comment.reactions == 0 then
+    return ""
+  end
+
+  -- Count reactions by type
+  local reaction_counts = {}
+  for _, reaction in ipairs(comment.reactions) do
+    if reaction and reaction.content and type(reaction.content) == "string" then
+      local emoji = reaction_emoji_map[reaction.content] or reaction.content
+      reaction_counts[emoji] = (reaction_counts[emoji] or 0) + 1
+    end
+  end
+
+  -- Format as "emoji count" pairs
+  local parts = {}
+  for emoji, count in pairs(reaction_counts) do
+    if count > 1 then
+      table.insert(parts, string.format("%s %d", emoji, count))
+    else
+      table.insert(parts, emoji)
+    end
+  end
+
+  if #parts > 0 then
+    return table.concat(parts, " ")
+  end
+  return ""
+end
+
+-- Format reactions for a line
+local function format_reactions_for_line(comments, line)
+  -- Collect all reactions from all comments on this line
+  local reaction_counts = {}
+  for _, comment in ipairs(comments) do
+    if comment.line == line and comment.reactions and type(comment.reactions) == "table" then
+      for _, reaction in ipairs(comment.reactions) do
+        -- Add nil checks to prevent errors with malformed reaction data
+        if reaction and reaction.content and type(reaction.content) == "string" then
+          local emoji = reaction_emoji_map[reaction.content] or reaction.content
+          reaction_counts[emoji] = (reaction_counts[emoji] or 0) + 1
+        end
+      end
+    end
+  end
+
+  -- Format as "emoji count" pairs
+  local parts = {}
+  for emoji, count in pairs(reaction_counts) do
+    if count > 1 then
+      table.insert(parts, string.format("%s %d", emoji, count))
+    else
+      table.insert(parts, emoji)
+    end
+  end
+
+  if #parts > 0 then
+    return " " .. table.concat(parts, " ")
+  end
+  return ""
+end
+
 local function display_comments(bufnr, comments)
   vim.api.nvim_buf_clear_namespace(bufnr, ns_id, 0, -1)
 
@@ -2017,6 +2093,8 @@ local function display_comments(bufnr, comments)
         end
       end
 
+      local reactions_text = format_reactions_for_line(comments, line)
+
       local text
       if M.config.show_icons then
         if has_pending then
@@ -2031,6 +2109,8 @@ local function display_comments(bufnr, comments)
           text = count > 1 and string.format(" [%d comments]", count) or " [1 comment]"
         end
       end
+
+      text = text .. reactions_text
 
       -- Get background color from the current line's highlight
       local line_bg = nil
@@ -2125,6 +2205,13 @@ function M.show_comments_at_cursor()
     for body_line in comment.body:gmatch("[^\r\n]+") do
       table.insert(lines, body_line)
     end
+
+    -- Add reactions if present
+    local reactions = format_comment_reactions(comment)
+    if reactions ~= "" then
+      table.insert(lines, "")
+      table.insert(lines, reactions)
+    end
   end
 
   vim.lsp.util.open_floating_preview(lines, "markdown", {
@@ -2133,6 +2220,116 @@ function M.show_comments_at_cursor()
     max_width = 80,
     max_height = 20,
   })
+end
+
+-- Helper function to select emoji and add/remove reaction
+local function select_and_add_reaction(pr_number, comment, bufnr)
+  -- First, get current user to check if they already reacted
+  github.get_current_user(function(current_user, err)
+    if err or not current_user then
+      vim.notify("Failed to get current user: " .. (err or "unknown error"), vim.log.levels.ERROR)
+      return
+    end
+
+    ui.select_emoji_reaction(function(reaction_content)
+      if not reaction_content then
+        return
+      end
+
+      -- Check if user already has this reaction on the comment
+      local existing_reaction_id = nil
+      if comment.reactions then
+        for _, reaction in ipairs(comment.reactions) do
+          if reaction.content == reaction_content and reaction.user == current_user then
+            existing_reaction_id = reaction.id
+            break
+          end
+        end
+      end
+
+      if existing_reaction_id then
+        -- Remove the reaction
+        github.remove_comment_reaction(comment.id, existing_reaction_id, function(success, remove_err)
+          if success then
+            vim.notify("Reaction removed!", vim.log.levels.INFO)
+            -- Reload comments to show the updated reactions
+            github.clear_cache()
+            M.load_comments_for_buffer(bufnr, true)
+          else
+            vim.notify("Failed to remove reaction: " .. (remove_err or "unknown error"), vim.log.levels.ERROR)
+          end
+        end)
+      else
+        -- Add the reaction
+        github.add_comment_reaction(comment.id, reaction_content, function(success, add_err)
+          if success then
+            vim.notify("Reaction added!", vim.log.levels.INFO)
+            -- Reload comments to show the new reaction
+            github.clear_cache()
+            M.load_comments_for_buffer(bufnr, true)
+          else
+            vim.notify("Failed to add reaction: " .. (add_err or "unknown error"), vim.log.levels.ERROR)
+          end
+        end)
+      end
+    end)
+  end)
+end
+
+-- Add emoji reaction to a comment at cursor line
+function M.add_reaction_to_comment()
+  local pr_number = vim.g.pr_review_number
+  if not pr_number then
+    vim.notify("Not in a PR review", vim.log.levels.WARN)
+    return
+  end
+
+  local bufnr = vim.api.nvim_get_current_buf()
+  local comments = M._buffer_comments[bufnr]
+  if not comments or #comments == 0 then
+    vim.notify("No comments on this file", vim.log.levels.INFO)
+    return
+  end
+
+  local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
+  local line_comments = {}
+  for _, comment in ipairs(comments) do
+    if comment.line == cursor_line and not comment.is_pending and not comment.is_local then
+      table.insert(line_comments, comment)
+    end
+  end
+
+  if #line_comments == 0 then
+    vim.notify("No posted comments on this line", vim.log.levels.INFO)
+    return
+  end
+
+  -- If multiple comments on the line, let user select which one
+  local target_comment
+  if #line_comments == 1 then
+    target_comment = line_comments[1]
+  else
+    local items = {}
+    for i, comment in ipairs(line_comments) do
+      local preview = comment.body:gsub("\n", " "):sub(1, 60)
+      if #comment.body > 60 then
+        preview = preview .. "..."
+      end
+      table.insert(items, string.format("%d. @%s: %s", i, comment.user, preview))
+    end
+
+    vim.ui.select(items, {
+      prompt = "Select comment to react to:",
+    }, function(_, idx)
+      if idx then
+        target_comment = line_comments[idx]
+        select_and_add_reaction(pr_number, target_comment, bufnr)
+      end
+    end)
+    return
+  end
+
+  select_and_add_reaction(pr_number, target_comment, bufnr)
 end
 
 function M.load_comments_for_buffer(bufnr, force_reload)
@@ -4733,6 +4930,10 @@ function M.setup(opts)
     M.delete_my_comment()
   end, { desc = "Delete your comment on the current line" })
 
+  vim.api.nvim_create_user_command("PRToggleReaction", function()
+    M.add_reaction_to_comment()
+  end, { desc = "Toggle emoji reaction on a comment at the current line" })
+
   vim.api.nvim_create_user_command("PRReviewMenu", function()
     M.show_review_menu()
   end, { desc = "Show PR Reviewer command menu" })
@@ -5342,6 +5543,7 @@ function M.show_review_menu()
           { key = "r", desc = "Reply to Comment",    cmd = function() M.reply_to_comment() end },
           { key = "m", desc = "Edit My Comment",     cmd = function() M.edit_my_comment() end },
           { key = "d", desc = "Delete Comment",      cmd = function() M.delete_my_comment() end },
+          { key = "R", desc = "Toggle Reaction",     cmd = function() M.add_reaction_to_comment() end },
         }
       },
       {

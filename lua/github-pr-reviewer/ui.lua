@@ -721,4 +721,38 @@ function M.select_global_comments(comments, picker, callback)
   end
 end
 
+-- Select emoji reaction
+function M.select_emoji_reaction(callback)
+  local reactions = {
+    { emoji = "👍", label = "👍 Thumbs Up", content = "+1" },
+    { emoji = "👎", label = "👎 Thumbs Down", content = "-1" },
+    { emoji = "😄", label = "😄 Laugh", content = "laugh" },
+    { emoji = "🎉", label = "🎉 Hooray", content = "hooray" },
+    { emoji = "😕", label = "😕 Confused", content = "confused" },
+    { emoji = "❤️", label = "❤️ Heart", content = "heart" },
+    { emoji = "🚀", label = "🚀 Rocket", content = "rocket" },
+    { emoji = "👀", label = "👀 Eyes", content = "eyes" },
+  }
+
+  local items = {}
+  local reaction_map = {}
+  for _, reaction in ipairs(reactions) do
+    table.insert(items, reaction.label)
+    reaction_map[reaction.label] = reaction.content
+  end
+
+  vim.ui.select(items, {
+    prompt = "Select emoji reaction:",
+    format_item = function(item)
+      return item
+    end,
+  }, function(choice)
+    if choice then
+      callback(reaction_map[choice])
+    else
+      callback(nil)
+    end
+  end)
+end
+
 return M

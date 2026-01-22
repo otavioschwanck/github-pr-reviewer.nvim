@@ -137,6 +137,9 @@ require("github-pr-reviewer").setup({
   -- Show floating windows with PR info, stats, and keymaps
   show_floats = true,
 
+  -- Max number of PRs to fetch when listing (default: 30)
+  pr_list_limit = 30,
+
   -- Key to mark file as viewed and go to next file (only works in review mode)
   mark_as_viewed_key = "<CR>",
 

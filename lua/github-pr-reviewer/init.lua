@@ -13,6 +13,7 @@ M.config = {
   show_inline_diff = true,        -- show inline diff in buffers (old lines as virtual text)
   show_floats = true,             -- show floating windows with info, stats and keymaps
   debug = false,                  -- show debug messages
+  pr_list_limit = 30,             -- max PRs to fetch when listing
   mark_as_viewed_key = "<CR>",    -- key to mark file as viewed and go to next file
   next_hunk_key = "<C-j>",        -- key to jump to next hunk
   prev_hunk_key = "<C-k>",        -- key to jump to previous hunk

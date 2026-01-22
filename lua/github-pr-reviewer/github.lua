@@ -11,7 +11,11 @@ local function debug_log(msg)
 end
 
 function M.list_open_prs()
-  local result = vim.fn.system("gh pr list --state open --json number,title,headRefName,baseRefName,author,headRepository,headRepositoryOwner,isCrossRepository,labels,headRefOid")
+  local pr_reviewer = require("github-pr-reviewer")
+  local result = vim.fn.system(
+    string.format("gh pr list --state open --limit %d --json number,title,headRefName,baseRefName,author,headRepository,headRepositoryOwner,isCrossRepository,labels,headRefOid",
+      pr_reviewer.config.pr_list_limit)
+  )
 
   if vim.v.shell_error ~= 0 then
     return nil, "Failed to fetch PRs. Make sure 'gh' CLI is installed and authenticated."
@@ -113,7 +117,11 @@ function M.get_pr_details(pr_number, callback)
 end
 
 function M.list_review_requests(callback)
-  local cmd = "gh pr list --search 'is:open review-requested:@me' --json number,title,headRefName,baseRefName,author,updatedAt,additions,deletions,headRepositoryOwner,headRepository,isCrossRepository"
+  local pr_reviewer = require("github-pr-reviewer")
+  local cmd = string.format(
+    "gh pr list --search 'is:open review-requested:@me' --limit %d --json number,title,headRefName,baseRefName,author,updatedAt,additions,deletions,headRepositoryOwner,headRepository,isCrossRepository",
+    pr_reviewer.config.pr_list_limit
+  )
 
   vim.fn.jobstart(cmd, {
     stdout_buffered = true,

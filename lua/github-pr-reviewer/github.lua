@@ -663,8 +663,15 @@ function M.submit_review_with_comments(pr_number, event, body, comments, callbac
       )
 
       local stderr_output = {}
+      local stdout_output = {}
       local job_id = vim.fn.jobstart(cmd, {
+        stdout_buffered = true,
         stderr_buffered = true,
+        on_stdout = function(_, out_data)
+          if out_data then
+            vim.list_extend(stdout_output, out_data)
+          end
+        end,
         on_stderr = function(_, err_data)
           if err_data then
             vim.list_extend(stderr_output, err_data)
@@ -677,7 +684,30 @@ function M.submit_review_with_comments(pr_number, event, body, comments, callbac
               callback(true, nil)
             else
               local err_msg = table.concat(stderr_output, "\n")
-              callback(false, "Failed to submit review: " .. err_msg)
+              local out_msg = table.concat(stdout_output, "\n")
+
+              -- Check if error is about lines not being resolved
+              if out_msg:match("Line could not be resolved") and #api_comments > 0 then
+                -- Show which comments have problematic lines
+                local error_lines = { "❌ Failed to submit review: some comment lines are no longer in the diff." }
+                table.insert(error_lines, "")
+                table.insert(error_lines, "Pending comments with potentially invalid lines:")
+                for i, c in ipairs(api_comments) do
+                  table.insert(error_lines, string.format("  %d. %s:%d", i, c.path, c.line))
+                end
+                table.insert(error_lines, "")
+                table.insert(error_lines, "Please delete the outdated pending comments with :PRListPendingComments")
+                vim.notify(table.concat(error_lines, "\n"), vim.log.levels.ERROR)
+                callback(false, "Lines could not be resolved - comments are outdated")
+              else
+                -- Show error for issue reporting
+                local error_lines = { "❌ Failed to submit review (HTTP 422)" }
+                table.insert(error_lines, "")
+                table.insert(error_lines, "stderr: " .. err_msg)
+                table.insert(error_lines, "response: " .. out_msg)
+                vim.notify(table.concat(error_lines, "\n"), vim.log.levels.ERROR)
+                callback(false, "Failed to submit review: " .. err_msg)
+              end
             end
           end)
         end,
@@ -718,13 +748,21 @@ function M.request_changes(pr_number, body, callback)
 
   local cmd = string.format("gh pr review %d --request-changes --body %s", pr_number, vim.fn.shellescape(body))
 
+  local stderr_output = {}
   vim.fn.jobstart(cmd, {
+    stderr_buffered = true,
+    on_stderr = function(_, err_data)
+      if err_data then
+        vim.list_extend(stderr_output, err_data)
+      end
+    end,
     on_exit = function(_, code)
       vim.schedule(function()
         if code == 0 then
           callback(true, nil)
         else
-          callback(false, "Failed to request changes")
+          local err_msg = table.concat(stderr_output, "\n")
+          callback(false, "Failed to request changes: " .. err_msg)
         end
       end)
     end,

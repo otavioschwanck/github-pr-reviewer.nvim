@@ -528,3 +528,5 @@ Defined in setup:
 
 **Last updated**: January 2025
 **Plugin Version**: 0.1+
+
+Just a test

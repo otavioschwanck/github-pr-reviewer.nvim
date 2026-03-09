@@ -963,6 +963,7 @@ local function render_review_buffer()
   local highlights = {}
   local file_map = {}          -- Maps line number to file
   M._review_files_ordered = {} -- Reset ordered list
+  local current_file_pos = nil
 
   -- Header
   local cfg = M.config.review_buffer
@@ -1037,6 +1038,7 @@ local function render_review_buffer()
 
           -- Highlight based on status or if current file
           if current_file_path and file.path == current_file_path then
+            current_file_pos = line_idx
             -- Highlight entire line for current file
             table.insert(highlights, { line = line_idx - 1, hl_group = "CursorLine" })
             -- Highlight filename with special color
@@ -1088,6 +1090,7 @@ local function render_review_buffer()
 
       -- Highlight based on status or if current file
       if current_file_path and file.path == current_file_path then
+        current_file_pos = line_idx
         -- Highlight entire line for current file
         table.insert(highlights, { line = line_idx - 1, hl_group = "CursorLine" })
         -- Highlight filepath with special color
@@ -1128,6 +1131,14 @@ local function render_review_buffer()
 
   -- Store file map in buffer variable
   vim.b[M._review_buffer].pr_file_map = file_map
+
+    -- Scroll current_file into view
+  if current_file_pos and M._review_window and vim.api.nvim_win_is_valid(M._review_window) then
+    vim.api.nvim_win_set_cursor(M._review_window, { current_file_pos, 0 })
+    vim.api.nvim_win_call(M._review_window, function()
+      vim.fn.winrestview({ topline = math.max(1, current_file_pos - 4) })
+    end)
+  end
 end
 
 -- Helper to open a file (including deleted files)

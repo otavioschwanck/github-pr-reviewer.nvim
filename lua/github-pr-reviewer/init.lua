@@ -1136,7 +1136,7 @@ local function render_review_buffer()
   if current_file_pos and M._review_window and vim.api.nvim_win_is_valid(M._review_window) then
     vim.api.nvim_win_set_cursor(M._review_window, { current_file_pos, 0 })
     vim.api.nvim_win_call(M._review_window, function()
-      vim.fn.winrestview({ topline = math.max(1, current_file_pos - 4) })
+    vim.fn.winrestview({ topline = math.max(1, current_file_pos - 4) })
     end)
   end
 end

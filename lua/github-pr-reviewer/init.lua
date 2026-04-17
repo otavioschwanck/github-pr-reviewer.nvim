@@ -53,6 +53,7 @@ M._buffer_comments = {}
 M._buffer_changes = {}
 M._buffer_hunks = {}
 M._diff_view_mode = "unified" -- "unified" or "split"
+M._fix_vsplit_pending = false  -- guard against concurrent fix_vsplit calls
 M._split_view_state = {}      -- tracks split view buffers and windows
 M._buffer_stats = {}
 M._viewed_files = {}
@@ -4079,6 +4080,7 @@ function M.list_global_comments()
 
           -- Extract only the reply part (everything after "## Your Reply:")
           local reply_start = full_text:find("## Your Reply:")
+          local reply_text
           if not reply_start then
             -- Fallback: use the entire text if marker not found
             reply_text = full_text
@@ -5272,7 +5274,13 @@ function M.setup(opts)
                     vim.defer_fn(function()
                       -- Double-check we're still in split mode and on the same buffer
                       if M._diff_view_mode == "split" and vim.api.nvim_get_current_buf() == args.buf then
-                        M.fix_vsplit()
+                        if not M._fix_vsplit_pending then
+                          M._fix_vsplit_pending = true
+                          M.fix_vsplit()
+                          vim.defer_fn(function()
+                            M._fix_vsplit_pending = false
+                          end, 200)
+                        end
                       end
                     end, 100)
                   end
@@ -5408,73 +5416,8 @@ function M.review_pr()
 end
 
 function M._do_review_pr_with_branch(pr)
-  -- Use head_label for fork PRs (includes owner:branch), replace : with -
-  local head_ref = (pr.head_label or pr.head_branch):gsub(":", "-")
-  local review_branch = string.format(
-    "%s%s_to_%s",
-    M.config.branch_prefix,
-    head_ref,
-    pr.base_branch
-  )
-
-  git.fetch_all(function(fetch_ok, fetch_err)
-    if not fetch_ok then
-      vim.notify("Error fetching: " .. (fetch_err or "unknown"), vim.log.levels.ERROR)
-      return
-    end
-
-    git.create_review_branch(review_branch, pr.base_branch, function(ok, create_err)
-      if not ok then
-        vim.notify("Error creating branch: " .. (create_err or "unknown"), vim.log.levels.ERROR)
-        return
-      end
-
-      debug_log(string.format("Debug: About to merge - branch=%s, owner=%s, url=%s",
-        pr.head_branch or "nil",
-        pr.head_repo_owner or "nil",
-        pr.head_repo_url or "nil"))
-      git.soft_merge(pr.head_branch, pr.head_repo_owner, pr.head_repo_url, function(merge_ok, merge_err, merge_base)
-        if not merge_ok then
-          vim.notify("Error during soft merge: " .. (merge_err or "unknown"), vim.log.levels.ERROR)
-          return
-        end
-
-        vim.g.pr_review_number = pr.number
-        vim.g.pr_review_base_branch = pr.base_branch
-        vim.g.pr_review_merge_base = merge_base
-
-        -- Start polling for remote updates
-        start_update_polling()
-
-        vim.notify(
-          string.format("✅ Ready to review PR #%s: %s", pr.number, pr.title),
-          vim.log.levels.INFO
-        )
-
-        git.get_modified_files_with_lines(function(files)
-          if files and #files > 0 then
-            vim.g.pr_review_modified_files = vim.tbl_map(function(f)
-              return { path = f.path, status = f.status }
-            end, files)
-
-            -- Save initial session
-            save_session()
-
-            -- Open review buffer and first file
-            M.open_review_buffer(function()
-              if M.config.open_files_on_review then
-                -- Use the ordered list (same order as ReviewBuffer)
-                local first_file = #M._review_files_ordered > 0 and M._review_files_ordered[1] or M._review_files[1]
-                if first_file then
-                  open_file_safe(first_file, nil)
-                end
-              end
-            end)
-          end
-        end)
-      end)
-    end)
-  end)
+  -- Delegate to the shared review start function
+  M._do_start_review(pr)
 end
 
 -- Refresh the PR branch with latest changes

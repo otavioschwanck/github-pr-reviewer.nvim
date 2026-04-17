@@ -50,9 +50,9 @@ function M.fetch_all(callback)
 end
 
 function M.create_review_branch(branch_name, base_branch, callback)
-  local existing = vim.fn.system("git branch --list " .. branch_name):gsub("%s+", "")
+  local existing = vim.fn.system("git branch --list " .. vim.fn.shellescape(branch_name)):gsub("%s+", "")
   if existing ~= "" then
-    vim.fn.jobstart("git branch -D " .. branch_name, {
+    vim.fn.jobstart("git branch -D " .. vim.fn.shellescape(branch_name), {
       on_exit = function(_, code)
         vim.schedule(function()
           if code == 0 then
@@ -70,7 +70,7 @@ end
 
 function M._do_create_branch(branch_name, base_branch, callback)
   local remote_base = "origin/" .. base_branch
-  local cmd = string.format("git checkout -b %s %s", branch_name, remote_base)
+  local cmd = string.format("git checkout -b %s %s", vim.fn.shellescape(branch_name), vim.fn.shellescape(remote_base))
 
   vim.fn.jobstart(cmd, {
     on_exit = function(_, code)
@@ -245,14 +245,14 @@ function M.soft_merge(source_branch, head_repo_owner, head_repo_url, callback)
   if head_repo_owner and head_repo_url then
     M.add_fork_remote(head_repo_owner, head_repo_url, function(remote)
       local remote_source = remote .. "/" .. source_branch
-      local cmd = string.format("git merge --no-commit --no-ff %s", remote_source)
+      local cmd = string.format("git merge --no-commit --no-ff %s", vim.fn.shellescape(remote_source))
       debug_log(string.format("Debug: Merging %s", remote_source))
       do_merge(cmd, callback)
     end)
   else
     -- Fallback to origin if no owner specified
     local remote_source = "origin/" .. source_branch
-    local cmd = string.format("git merge --no-commit --no-ff %s", remote_source)
+    local cmd = string.format("git merge --no-commit --no-ff %s", vim.fn.shellescape(remote_source))
     debug_log(string.format("Debug: Merging %s", remote_source))
     do_merge(cmd, callback)
   end
@@ -353,7 +353,7 @@ function M.cleanup_review(review_branch, target_branch, callback)
   local files = vim.g.pr_review_modified_files or {}
 
   local function do_checkout_and_delete()
-    vim.fn.jobstart("git checkout " .. target_branch, {
+    vim.fn.jobstart("git checkout " .. vim.fn.shellescape(target_branch), {
       on_exit = function(_, code)
         vim.schedule(function()
           if code ~= 0 then
@@ -361,7 +361,7 @@ function M.cleanup_review(review_branch, target_branch, callback)
             return
           end
 
-          vim.fn.jobstart("git branch -D " .. review_branch, {
+          vim.fn.jobstart("git branch -D " .. vim.fn.shellescape(review_branch), {
             on_exit = function(_, del_code)
               vim.schedule(function()
                 if del_code == 0 then
@@ -401,14 +401,14 @@ function M.cleanup_review(review_branch, target_branch, callback)
     end
     local pending = #new_paths
     for _, path in ipairs(new_paths) do
-      vim.fn.jobstart("rm -rf " .. path, {
-        on_exit = function()
-          pending = pending - 1
-          if pending == 0 then
-            vim.schedule(next_callback)
-          end
-        end,
-      })
+      -- Remove surrounding quotes from shellescape before passing to delete()
+      local clean_path = path:gsub("^'", ""):gsub("'$", "")
+      -- Use vim.fn.delete for cross-platform compatibility (works on Windows too)
+      pcall(vim.fn.delete, clean_path, "rf")
+      pending = pending - 1
+      if pending == 0 then
+        vim.schedule(next_callback)
+      end
     end
   end
 

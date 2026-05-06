@@ -1196,14 +1196,22 @@ local function open_file_safe(file, split_cmd)
               return
             end
 
+            -- Sanitize data: stdout_buffered may produce chunks with embedded newlines
+            local lines = {}
+            for _, chunk in ipairs(data) do
+              for _, line in ipairs(vim.split(chunk, "\n", { plain = true })) do
+                table.insert(lines, line)
+              end
+            end
+
             -- Filter empty last line if present
-            if data[#data] == "" then
-              table.remove(data, #data)
+            if lines[#lines] == "" then
+              table.remove(lines, #lines)
             end
 
             -- Create scratch buffer with old content
             local buf = vim.api.nvim_create_buf(false, true)
-            vim.api.nvim_buf_set_lines(buf, 0, -1, false, data)
+            vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
             vim.bo[buf].filetype = vim.filetype.match({ filename = file.path }) or ""
             vim.bo[buf].buftype = "nofile"
             vim.bo[buf].modifiable = false

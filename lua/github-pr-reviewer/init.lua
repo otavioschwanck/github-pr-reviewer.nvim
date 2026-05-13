@@ -4,6 +4,12 @@ local github = require("github-pr-reviewer.github")
 local git = require("github-pr-reviewer.git")
 local ui = require("github-pr-reviewer.ui")
 
+-- POSIX-safe path quoting that preserves UTF-8 bytes unlike vim.fn.shellescape()
+-- which escapes multi-byte characters as octal sequences that git can't parse.
+M.shell_escape_path = function(path)
+  return "'" .. path:gsub("'", "'\\''") .. "'"
+end
+
 M.config = {
   branch_prefix = "reviewing_",
   picker = "native",              -- "native", "fzf-lua", "telescope"
@@ -285,7 +291,7 @@ local function collect_pr_files(callback)
   -- First get tracked changes (M, A, D)
   -- Compare with the base branch of the PR, not HEAD
   local base_branch = vim.g.pr_review_base_branch or "master"
-  local cmd = string.format("git diff --name-status origin/%s", base_branch)
+  local cmd = string.format("git -c core.quotePath=false diff --name-status origin/%s", base_branch)
   vim.fn.jobstart(cmd, {
     stdout_buffered = true,
     on_stdout = function(_, data)
@@ -311,7 +317,7 @@ local function collect_pr_files(callback)
       end
 
       -- Now get untracked files
-      local untracked_cmd = "git ls-files --others --exclude-standard"
+      local untracked_cmd = "git -c core.quotePath=false ls-files --others --exclude-standard"
       vim.fn.jobstart(untracked_cmd, {
         stdout_buffered = true,
         on_stdout = function(_, untracked_data)
@@ -397,11 +403,11 @@ local function get_changed_lines_for_file(file_path, status, callback)
   local cmd
   if status == "N" then
     -- For new/untracked files, compare with /dev/null
-    cmd = string.format("git diff --unified=0 --no-index /dev/null -- %s", vim.fn.shellescape(file_path))
+    cmd = string.format("git diff --unified=0 --no-index /dev/null -- %s", M.shell_escape_path(file_path))
   else
     local merge_base = vim.g.pr_review_merge_base
     local base_ref = merge_base and merge_base or "HEAD"
-    cmd = string.format("git diff --unified=0 %s -- %s", base_ref, vim.fn.shellescape(file_path))
+    cmd = string.format("git diff --unified=0 %s -- %s", base_ref, M.shell_escape_path(file_path))
   end
   vim.fn.jobstart(cmd, {
     stdout_buffered = true,
@@ -460,11 +466,11 @@ get_inline_diff = function(file_path, status, callback)
   -- For new/untracked files, use a different command to get all lines
   local cmd
   if status == "A" or status == "N" then
-    cmd = string.format("git diff --unified=0 --no-index /dev/null -- %s", vim.fn.shellescape(file_path))
+    cmd = string.format("git diff --unified=0 --no-index /dev/null -- %s", M.shell_escape_path(file_path))
   else
     local merge_base = vim.g.pr_review_merge_base
     local base_ref = merge_base and merge_base or "HEAD"
-    cmd = string.format("git diff --unified=0 %s -- %s", base_ref, vim.fn.shellescape(file_path))
+    cmd = string.format("git diff --unified=0 %s -- %s", base_ref, M.shell_escape_path(file_path))
   end
 
   vim.fn.jobstart(cmd, {
@@ -675,21 +681,21 @@ local function create_split_view(current_bufnr, file_path)
 
   -- Prefer merge-base (exact common ancestor, matches GitHub's diff base)
   if merge_base then
-    table.insert(attempts, string.format("%s:%s", merge_base, file_path))
+    table.insert(attempts, M.shell_escape_path(string.format("%s:%s", merge_base, file_path)))
   end
 
   -- If we have base_branch, try it as fallback
   if base_branch then
-    table.insert(attempts, string.format("origin/%s:%s", base_branch, file_path))
-    table.insert(attempts, string.format("%s:%s", base_branch, file_path))
+    table.insert(attempts, M.shell_escape_path(string.format("origin/%s:%s", base_branch, file_path)))
+    table.insert(attempts, M.shell_escape_path(string.format("%s:%s", base_branch, file_path)))
   end
 
   -- Fallback attempts
-  table.insert(attempts, string.format("origin/main:%s", file_path))
-  table.insert(attempts, string.format("origin/master:%s", file_path))
-  table.insert(attempts, string.format("main:%s", file_path))
-  table.insert(attempts, string.format("master:%s", file_path))
-  table.insert(attempts, string.format("HEAD~1:%s", file_path))
+  table.insert(attempts, M.shell_escape_path(string.format("origin/main:%s", file_path)))
+  table.insert(attempts, M.shell_escape_path(string.format("origin/master:%s", file_path)))
+  table.insert(attempts, M.shell_escape_path(string.format("main:%s", file_path)))
+  table.insert(attempts, M.shell_escape_path(string.format("master:%s", file_path)))
+  table.insert(attempts, M.shell_escape_path(string.format("HEAD~1:%s", file_path)))
 
   local base_content
   local success = false
@@ -1186,7 +1192,7 @@ local function open_file_safe(file, split_cmd)
     else
       -- Open deleted file from merge_base (the PR's base commit, matching GitHub's view)
       local del_ref = vim.g.pr_review_merge_base or "HEAD"
-      local cmd = string.format("git show %s:%s", del_ref, vim.fn.shellescape(file.path))
+      local cmd = string.format("git show %s:%s", del_ref, M.shell_escape_path(file.path))
       vim.fn.jobstart(cmd, {
         stdout_buffered = true,
         on_stdout = function(_, data)

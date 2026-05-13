@@ -1,5 +1,11 @@
 local M = {}
 
+-- POSIX-safe path quoting that preserves UTF-8 bytes unlike vim.fn.shellescape()
+-- which escapes multi-byte characters as octal sequences that git can't parse.
+local function shell_escape_path(path)
+  return "'" .. path:gsub("'", "'\\''") .. "'"
+end
+
 -- Debug logging helper
 local function debug_log(msg)
   local pr_reviewer = require("github-pr-reviewer")
@@ -167,7 +173,7 @@ local function checkout_pr_files_from_merge_head(merge_base, callback)
     callback()
     return
   end
-  local diff_cmd = string.format("git diff --name-only --diff-filter=AM %s MERGE_HEAD", merge_base)
+  local diff_cmd = string.format("git -c core.quotePath=false diff --name-only --diff-filter=AM %s MERGE_HEAD", merge_base)
   vim.fn.jobstart(diff_cmd, {
     stdout_buffered = true,
     on_stdout = function(_, data)
@@ -184,7 +190,7 @@ local function checkout_pr_files_from_merge_head(merge_base, callback)
           callback()
           return
         end
-        local files_str = table.concat(vim.tbl_map(vim.fn.shellescape, pr_files), " ")
+        local files_str = table.concat(vim.tbl_map(shell_escape_path, pr_files), " ")
         vim.fn.jobstart("git checkout MERGE_HEAD -- " .. files_str, {
           on_exit = function()
             vim.schedule(callback)
@@ -275,7 +281,7 @@ end
 function M.get_modified_files_with_lines(callback)
   local merge_base = vim.g.pr_review_merge_base
   local base_ref = merge_base and merge_base or "HEAD"
-  local result = vim.fn.system("git diff --name-status " .. base_ref)
+  local result = vim.fn.system("git -c core.quotePath=false diff --name-status " .. base_ref)
   vim.schedule(function()
     debug_log(string.format("Debug: git diff output (first 200 chars): %s", result:sub(1, 200)))
   end)
@@ -297,7 +303,7 @@ function M.get_modified_files_with_lines(callback)
     debug_log(string.format("Debug: Found %d files", #files))
   end)
 
-  local untracked = vim.fn.system("git ls-files --others --exclude-standard")
+  local untracked = vim.fn.system("git -c core.quotePath=false ls-files --others --exclude-standard")
   if vim.v.shell_error == 0 then
     for path in untracked:gmatch("[^\r\n]+") do
       if path and path ~= "" then
@@ -314,7 +320,7 @@ function M.get_modified_files_with_lines(callback)
   local pending = #files
   for i, file in ipairs(files) do
     if file.status ~= "D" and file.status ~= "?" then
-      local diff_cmd = string.format("git diff --unified=0 %s -- %s", base_ref, vim.fn.shellescape(file.path))
+      local diff_cmd = string.format("git diff --unified=0 %s -- %s", base_ref, shell_escape_path(file.path))
       vim.fn.jobstart(diff_cmd, {
         stdout_buffered = true,
         on_stdout = function(_, data)
@@ -388,9 +394,9 @@ function M.cleanup_review(review_branch, target_branch, callback)
 
   for _, file in ipairs(files) do
     if file.status == "A" or file.status == "?" then
-      table.insert(new_paths, vim.fn.shellescape(file.path))
+      table.insert(new_paths, shell_escape_path(file.path))
     else
-      table.insert(modified_paths, vim.fn.shellescape(file.path))
+      table.insert(modified_paths, shell_escape_path(file.path))
     end
   end
 
